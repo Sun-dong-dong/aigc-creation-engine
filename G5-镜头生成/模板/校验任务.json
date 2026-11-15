@@ -5,6 +5,8 @@
   "entry": "h3-native-prompt",
   "sound_policy": "sound",
   "prompt_file": "提示词.txt",
+  "plan_file": "生成分段方案.json",
+  "group_id": "段号A",
   "source_files": [
     {
       "path": "分镜.md",

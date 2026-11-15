@@ -1,0 +1,13 @@
+{
+  "scope_shots": ["镜号01"],
+  "source_sha256": ["分镜文件SHA256"],
+  "groups": [
+    {
+      "id": "段号A",
+      "shots": ["镜号01"],
+      "duration": 0,
+      "reason": "填写本段合并或单镜的具体理由"
+    }
+  ],
+  "boundaries": []
+}

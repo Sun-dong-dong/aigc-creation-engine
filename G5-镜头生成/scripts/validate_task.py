@@ -46,8 +46,13 @@ def inputs(path, task):
     for item in task.get('source_files', []) + task.get('references', []):
         p = resolve(root, item['path'])
         files[item['path']] = sha(p.read_bytes())
-    payload = {k: v for k, v in task.items() if k != 'review'}
+    payload = {k: v for k, v in task.items() if k not in ('review', 'authorization')}
+    try:
+        plan_hash = sha(resolve(root, task['plan_file']).read_bytes())
+    except (KeyError, OSError, ValueError):
+        plan_hash = None
     payload.update(actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
+                   actual_segmentation_sha256=plan_hash,
                    actual_template_sha256=sha(template.read_bytes()), profile_contract=profile,
                    actual_norm_sha256=sha((BASE / '模型提示词规范.md').read_bytes()),
                    validator_sha256=sha(Path(__file__).read_bytes()))
@@ -228,6 +233,76 @@ def seedance_format(text, task, errors):
     return blocks, text
 
 
+def check_segmentation(plan, shots, sources, duration, errors):
+    def reason_present(value):
+        return isinstance(value, str) and value.strip() not in ('', '待填', '待填写', '待补充', '无', 'N/A', 'TODO') and not value.strip().startswith('填写')
+
+    if not isinstance(plan, dict):
+        errors.append('缺少有效的生成分段方案')
+        return None
+    scope = plan.get('scope_shots')
+    groups = plan.get('groups')
+    boundaries = plan.get('boundaries')
+    if not isinstance(scope, list) or not scope or any(not isinstance(x, str) or not x.strip() for x in scope) or len(set(scope)) != len(scope):
+        errors.append('分段范围镜号为空、无效或重复')
+        return None
+    if not isinstance(groups, list) or not groups or not isinstance(boundaries, list):
+        errors.append('分段方案缺少生成段或相邻镜头判断')
+        return None
+    plan_sources = plan.get('source_sha256')
+    task_sources = [s.get('sha256') for s in sources]
+    if not isinstance(plan_sources, list) or not plan_sources or any(not isinstance(x, str) or not x.strip() or x not in task_sources for x in plan_sources):
+        errors.append('分段方案的分镜版本摘要不匹配')
+    group_ids, ordered, membership, matches = [], [], {}, []
+    task_ids = [s.get('id') for s in shots]
+    for group in groups:
+        if not isinstance(group, dict):
+            errors.append('生成段格式无效')
+            return None
+        gid, ids, why, seconds = group.get('id'), group.get('shots'), group.get('reason'), group.get('duration')
+        if not isinstance(gid, str) or not gid.strip() or gid in group_ids:
+            errors.append('生成段编号为空或重复')
+            return None
+        if not isinstance(ids, list) or not ids or any(not isinstance(x, str) or not x.strip() for x in ids):
+            errors.append(f'{gid}缺少有效镜号')
+            return None
+        if not reason_present(why):
+            errors.append(f'{gid}缺少分组或单镜理由')
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            errors.append(f'{gid}缺少有效的请求时长')
+        group_ids.append(gid)
+        ordered.extend(ids)
+        for sid in ids:
+            membership[sid] = gid
+        if ids == task_ids:
+            matches.append(group)
+    if ordered != scope:
+        errors.append('生成段镜号遗漏、重复或顺序与本次分镜范围不一致')
+    expected = list(zip(scope, scope[1:]))
+    actual = []
+    for item in boundaries:
+        if not isinstance(item, dict):
+            errors.append('相邻镜头判断格式无效')
+            return None
+        left, right = item.get('left'), item.get('right')
+        actual.append((left, right))
+        if not reason_present(item.get('reason')):
+            errors.append('相邻镜头缺少合并或拆分理由')
+        if left in membership and right in membership:
+            expected_decision = 'merge' if membership[left] == membership[right] else 'split'
+            if item.get('decision') != expected_decision:
+                errors.append('相邻镜头的合并或拆分判断与实际分组不一致')
+    if actual != expected:
+        errors.append('缺少按原顺序逐一判断的相邻镜头')
+    if len(matches) != 1:
+        errors.append('本次任务镜号与分段方案中的生成段不一致')
+        return None
+    match = matches[0]
+    if type(match.get('duration')) not in (int, float) or match['duration'] != duration:
+        errors.append('本次任务时长与分段方案不一致')
+    return match['id']
+
+
 def validate(path):
     path, task = read_task(path)
     text, profile, filehashes, digest = inputs(path, task)
@@ -253,6 +328,13 @@ def validate(path):
     sources = task.get('source_files', [])
     if not sources:
         errors.append('缺少可逐镜对照的分镜来源文件')
+    try:
+        plan = json.loads(resolve(path.parent, task.get('plan_file')).read_text(encoding='utf-8'))
+    except (OSError, ValueError, json.JSONDecodeError):
+        plan = None
+    group_id = check_segmentation(plan, shots, sources, duration, errors)
+    if not isinstance(task.get('group_id'), str) or task.get('group_id') != group_id:
+        errors.append('本次任务缺少匹配的生成段编号')
     source_text = '\n'.join(resolve(path.parent, x['path']).read_text(encoding='utf-8') for x in sources)
     for item in sources + task.get('references', []):
         if item.get('sha256') != filehashes[item['path']]:

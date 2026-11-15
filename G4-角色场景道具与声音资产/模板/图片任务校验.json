@@ -1,0 +1,22 @@
+{
+  "asset_id": "待填",
+  "kind": "character_face",
+  "aspect_ratio": "3:4",
+  "model": {
+    "name": "待填",
+    "version": "待填",
+    "mode": "待填",
+    "entry": "待填",
+    "official_url": "",
+    "official_evidence": ""
+  },
+  "prompt_file": "提示词.txt",
+  "references": [],
+  "override": {"rules": [], "user_instruction": ""},
+  "authorization": {"generate": false, "scope": ""},
+  "review": {
+    "fingerprint": "",
+    "format": {"passed": false, "evidence": ""},
+    "content": {"passed": false, "evidence": ""}
+  }
+}
