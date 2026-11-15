@@ -12,7 +12,7 @@ BASE = Path(__file__).resolve().parents[1]
 ELEMENTS = ('size', 'angle_composition', 'camera', 'subject', 'action',
             'environment_light', 'style_constraints')
 JUDGMENTS = ('dialogue_speakers', 'states', 'sound', 'continuity',
-             'clarity', 'current_basis')
+             'clarity', 'current_basis', 'music_subtitles')
 H3_BASE = ['integrated_multimodal_description', 'overall_soundscape', 'non_diegetic_music']
 H3_REF = ['subject_definitions', 'summary', 'retention_analysis', 'detailed_description',
           'overall_soundscape', 'non_diegetic_music']
@@ -51,8 +51,13 @@ def inputs(path, task):
         plan_hash = sha(resolve(root, task['plan_file']).read_bytes())
     except (KeyError, OSError, ValueError):
         plan_hash = None
+    try:
+        draft_hash = sha(resolve(root, task['draft_review']['path']).read_bytes())
+    except (KeyError, OSError, ValueError, TypeError):
+        draft_hash = None
     payload.update(actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
                    actual_segmentation_sha256=plan_hash,
+                   actual_first_draft_sha256=draft_hash,
                    actual_template_sha256=sha(template.read_bytes()), profile_contract=profile,
                    actual_norm_sha256=sha((BASE / '模型提示词规范.md').read_bytes()),
                    validator_sha256=sha(Path(__file__).read_bytes()))
@@ -184,12 +189,23 @@ def h3_format(text, task, errors):
     protected = re.sub(r'<d>.*?</d>|"[^"\n]*"', '', text, flags=re.S)
     if re.search(r'[\u4e00-\u9fff]', protected):
         errors.append('H3非对白或画内文字部分应使用英文')
+    if 'No on-screen text.' not in re.sub(r'<d>.*?</d>|"[^"\n]*"', '', body, flags=re.S):
+        errors.append('H3画面描述缺少无画面文字要求：No on-screen text.')
+    if re.search(r'\b(?:on[- ]screen text|subtitle|caption)\s+(?:reads|says|displays|shows|appears)\b', body, re.I):
+        errors.append('H3画面描述包含显示文字的指令，需交给后期')
+    if sections.get('non_diegetic_music') != 'N/A':
+        errors.append('H3无背景音乐时non_diegetic_music必须为N/A')
     if sections['overall_soundscape'] == 'N/A' and task.get('sound_policy') != 'silent':
         errors.append('H3声景N/A只用于已明确全程静音的任务')
     return blocks, body
 
 
 def seedance_format(text, task, errors):
+    policy_text = re.sub(r'\{[^{}]*\}|〖[^〗]*〗|“[^”]*”|"[^"\n]*"|「[^」]*」|『[^』]*』', '', text)
+    if '画面无任何文字，无背景音乐。' not in policy_text:
+        errors.append('即梦提示词缺少贯穿要求：画面无任何文字，无背景音乐。')
+    if re.search(r'〖[^〗]+〗', text):
+        errors.append('即梦提示词包含画面文字标记，文字应交给后期')
     if re.search(r'^(?:' + '|'.join(H3_BASE + H3_REF) + r'):', text, re.M) or re.search(LABEL, text):
         errors.append('Seedance混入H3字段或标签')
     markers = list(re.finditer(r'^镜头\s*(\d+)\s*[：:]', text, re.M))
@@ -303,6 +319,34 @@ def check_segmentation(plan, shots, sources, duration, errors):
     return match['id']
 
 
+def shot_source_blocks(root, sources, bindings, shots, errors, pending):
+    """Bind each shot to one uniquely identified Markdown heading and its body."""
+    allowed = {item['path'] for item in sources}
+    blocks = {}
+    for shot in shots:
+        sid = shot['id']
+        binding = bindings.get(sid, {})
+        name, heading = binding.get('path'), binding.get('heading', '')
+        if not name or not heading:
+            pending.append(f'{sid}缺少分镜来源文件和镜头标题绑定')
+            continue
+        if name not in allowed or not re.fullmatch(r'#{1,6}\s+[^\n]+', heading):
+            errors.append(f'{sid}的来源绑定不是已登记文件中的Markdown标题')
+            continue
+        source = resolve(root, name).read_text(encoding='utf-8')
+        hits = list(re.finditer(r'^' + re.escape(heading) + r'\s*$', source, re.M))
+        shot_num = re.search(r'\d+', sid)
+        header_num = re.search(r'(?:镜头|镜|shot|s)\s*0*(\d+)', heading, re.I)
+        if len(hits) != 1 or not shot_num or not header_num or int(shot_num[0]) != int(header_num[1]):
+            errors.append(f'{sid}的镜头标题无法唯一定位或镜号不符')
+            continue
+        start = hits[0].start()
+        following = re.search(r'^#{1,6}\s+', source[hits[0].end():], re.M)
+        end = hits[0].end() + following.start() if following else len(source)
+        blocks[sid] = source[start:end]
+    return blocks
+
+
 def validate(path):
     path, task = read_task(path)
     text, profile, filehashes, digest = inputs(path, task)
@@ -369,8 +413,49 @@ def validate(path):
         if task['mode'] == 'R2V' and not refs:
             errors.append('参考模式缺少真实参考')
         blocks, _ = seedance_format(text, task, errors)
+    format_errors = list(errors)
     before_review_errors = len(errors)
     review = task.get('review', {})
+    source_blocks = shot_source_blocks(path.parent, sources, review.get('source_bindings', {}), shots, errors, pending)
+    first = task.get('draft_review', {})
+    draft = ''
+    try:
+        first_path = resolve(path.parent, first.get('path'))
+        if first_path == resolve(path.parent, task['prompt_file']):
+            errors.append('初稿与第二版必须分别保存')
+        draft = first_path.read_text(encoding='utf-8')
+        if first.get('sha256') != sha(draft.encode()):
+            errors.append('初稿摘要不一致，须重新检查初稿')
+    except (OSError, ValueError, TypeError):
+        pending.append('缺少可读取的初稿及其复检记录')
+    if (first.get('completed') is not True or not first.get('reviewer')
+            or not first.get('reviewed_at') or not first.get('summary')):
+        pending.append('初稿逐镜复检尚未完成或缺少复检人、时间与结论')
+    if (first.get('review_method') != 'independent_subagent'
+            or not str(first.get('review_evidence', '')).strip()):
+        pending.append('缺少独立子代理初稿复检的实际记录')
+    if first.get('reviewed_shots') != [s['id'] for s in shots]:
+        pending.append('初稿复检尚未覆盖本段全部镜头')
+    issues = first.get('issues')
+    if not isinstance(issues, list):
+        pending.append('缺少初稿问题记录；无问题须明确记录空数组')
+    else:
+        for issue in issues:
+            sid = issue.get('shot')
+            if sid not in source_blocks or not issue.get('finding', '').strip():
+                pending.append('初稿问题缺少有效镜号或具体问题')
+                continue
+            a, b = issue.get('source_quote', ''), issue.get('revision_quote', '')
+            deferred = issue.get('resolution') == 'deferred_post'
+            if (not a.strip() or a not in source_blocks[sid]
+                    or (deferred and not issue.get('post_note', '').strip())
+                    or (not deferred and (not b.strip() or b not in blocks.get(sid, '')))):
+                errors.append(f'{sid}初稿问题的分镜依据或第二版修订证据无法定位')
+            old = issue.get('draft_quote', '')
+            if old and old not in draft:
+                errors.append(f'{sid}初稿问题引用无法定位')
+            if issue.get('resolved') is not True:
+                pending.append(f'{sid}初稿问题尚未在第二版解决')
     if review.get('fingerprint') != digest:
         pending.append('缺少对应当前输入指纹的内容复核，或原复核已失效')
     if not review.get('reviewer') or not review.get('reviewed_at'):
@@ -380,13 +465,70 @@ def validate(path):
         sid = shot['id']
         for element in ELEMENTS:
             row = coverage.get(sid, {}).get(element, {})
+            if row.get('status') == 'not_applicable':
+                if not row.get('reason', '').strip():
+                    pending.append(f'{sid}/{element}不适用时须说明依据')
+                continue
             if row.get('status') != 'pass':
                 pending.append(f'{sid}/{element}尚未复核通过')
                 continue
             a, b = row.get('source_quote', ''), row.get('prompt_quote', '')
             pool = text if row.get('scope') == 'shared' else blocks.get(sid, '')
-            if not a.strip() or a not in source_text or not b.strip() or b not in pool:
+            source_pool = source_text if row.get('scope') == 'shared' else source_blocks.get(sid, '')
+            if row.get('scope') == 'shared' and not row.get('scope_reason', '').strip():
+                pending.append(f'{sid}/{element}的共享依据缺少适用说明')
+            if not a.strip() or a not in source_pool or not b.strip() or b not in pool:
                 errors.append(f'{sid}/{element}的分镜或提示词证据无法定位')
+        details = review.get('detail_checks', {}).get(sid, [])
+        if not isinstance(details, list) or not details:
+            pending.append(f'{sid}缺少逐条关键细节核对')
+            continue
+        for detail in details:
+            a, b = detail.get('source_quote', ''), detail.get('prompt_quote', '')
+            shared = detail.get('scope') == 'shared'
+            source_pool = source_text if shared else source_blocks.get(sid, '')
+            prompt_pool = text if shared else blocks.get(sid, '')
+            if detail.get('status') == 'deferred_post':
+                if (not detail.get('item', '').strip() or not a.strip() or a not in source_pool
+                        or not detail.get('post_note', '').strip()):
+                    errors.append(f'{sid}后期文字交接缺少分镜依据或交接记录')
+            elif detail.get('status') != 'pass':
+                pending.append(f'{sid}存在未完成的关键细节核对')
+            elif (not detail.get('item', '').strip() or not a.strip() or a not in source_pool
+                  or not b.strip() or b not in prompt_pool or (shared and not detail.get('scope_reason', '').strip())):
+                errors.append(f'{sid}关键细节的来源或提示词证据无法定位')
+    requirements = task.get('reference_requirements', {})
+    if requirements.get('reviewed') is not True or not requirements.get('basis', '').strip():
+        pending.append('尚未核对用户及资产清单中的全部素材与音色需求')
+    required = requirements.get('items')
+    if not isinstance(required, list):
+        pending.append('缺少素材与音色需求清单；无需求也须显式登记空清单')
+    else:
+        by_label = {ref['label']: ref for ref in refs}
+        for item in required:
+            if not item.get('name') or not item.get('role') or not item.get('basis'):
+                pending.append('素材需求缺少名称、职责或选用依据')
+            involved = item.get('shots')
+            if not isinstance(involved, list) or not involved or not set(involved) <= {s['id'] for s in shots}:
+                pending.append(f"素材需求缺少本段适用镜号：{item.get('name', '未命名')}")
+            label = item.get('label')
+            if item.get('verified') is not True or label not in by_label:
+                pending.append(f"素材需求尚未核实实际输入绑定：{item.get('name', '未命名')}")
+            elif not item.get('binding_evidence', '').strip():
+                pending.append(f"素材需求缺少绑定依据：{item.get('name', '未命名')}")
+    timing = task.get('duration_assessment', {})
+    duration_risk = None
+    original = timing.get('source_seconds')
+    if type(original) not in (int, float) or not math.isfinite(original) or original <= 0 or not timing.get('basis', '').strip():
+        pending.append('缺少原分镜时长及本段容量判断依据')
+    elif original > duration:
+        measured = timing.get('measured_seconds')
+        if (timing.get('status') != 'measured' or type(measured) not in (int, float)
+                or not math.isfinite(measured) or measured <= 0 or measured > duration
+                or not timing.get('method', '').strip() or not timing.get('evidence', '').strip()):
+            duration_risk = '压缩时长的对白、动作与反应容量尚未实测通过；交付提示词时须明确标记风险，生成前需核实容量并按授权执行。'
+    elif timing.get('status') not in ('estimated', 'measured'):
+        pending.append('本段容量判断状态待记录')
     for name in JUDGMENTS:
         item = review.get('judgments', {}).get(name, {})
         if item.get('status') != 'pass' or not item.get('evidence', '').strip():
@@ -396,13 +538,14 @@ def validate(path):
     if runtime.get('verified') is not True or not runtime.get('evidence') or not runtime.get('checked_at'):
         pending.append('实际入口、模式与参数条件尚未核实')
     report = {'task_id':task.get('task_id'), 'fingerprint':digest,
-              'format_result':'fail' if errors else 'pass',
+              'format_result':'fail' if format_errors else 'pass',
               'content_review':('invalid_evidence' if len(errors) > before_review_errors else 'recorded_pass' if not content_pending else 'pending'),
               'errors':errors, 'pending':pending,
               'formal_prompt_ready':not errors and not pending,
-              'generation_ready':not errors and not pending and task.get('authorization', {}).get('generate') is True and bool(task.get('authorization', {}).get('scope')),
+              'generation_ready':not errors and not pending and not duration_risk and task.get('authorization', {}).get('generate') is True and bool(task.get('authorization', {}).get('scope')),
+              'duration_risk':duration_risk,
               'media_acceptance':'not_evaluated',
-              'limits':'内容判断取自实际复核记录；程序检查证据与版本绑定，不自动证明语义或画面正确。'}
+              'limits':'格式检查与人工内容记录分开；程序只能核对已登记证据及绑定，不能发现未登记细节或声音需求，也不能证明引用语义、试读真实性、画面或声音效果。'}
     return report
 
 

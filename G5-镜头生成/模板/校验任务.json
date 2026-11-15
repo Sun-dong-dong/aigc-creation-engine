@@ -5,6 +5,18 @@
   "entry": "h3-native-prompt",
   "sound_policy": "sound",
   "prompt_file": "提示词.txt",
+  "draft_review": {
+    "path": "初稿.txt",
+    "sha256": "待填",
+    "completed": false,
+    "reviewer": "",
+    "reviewed_at": "",
+    "review_method": "",
+    "review_evidence": "",
+    "reviewed_shots": [],
+    "summary": "",
+    "issues": []
+  },
   "plan_file": "生成分段方案.json",
   "group_id": "段号A",
   "source_files": [
@@ -14,6 +26,19 @@
     }
   ],
   "references": [],
+  "reference_requirements": {
+    "reviewed": false,
+    "basis": "",
+    "items": []
+  },
+  "duration_assessment": {
+    "source_seconds": 0,
+    "basis": "",
+    "status": "pending",
+    "measured_seconds": 0,
+    "method": "",
+    "evidence": ""
+  },
   "shots": [
     {
       "id": "镜号",
@@ -39,6 +64,8 @@
     "fingerprint": "",
     "reviewer": "",
     "reviewed_at": "",
+    "source_bindings": {},
+    "detail_checks": {},
     "coverage": {},
     "judgments": {}
   }
