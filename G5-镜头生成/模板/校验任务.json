@@ -68,7 +68,12 @@
     "detail_checks": {},
     "coverage": {},
     "judgments": {},
-    "lighting": {}
+    "lighting": {},
+    "delivery": {
+      "status": "pending",
+      "sha256": "",
+      "evidence": ""
+    }
   },
   "fixed_context": {
     "path": "../../G2-导演与视听设计/项目固定描述.json",
@@ -79,5 +84,14 @@
     "scene_omission_reason": "",
     "reviewed": false,
     "review_evidence": ""
-  }
+  },
+  "delivery_file": "生成提示词.md",
+  "dependency_files": [],
+  "continuity_context": {
+    "applicable": false,
+    "basis": "",
+    "dependency_path": "",
+    "frame_time_seconds": null
+  },
+  "post_handoff_file": ""
 }

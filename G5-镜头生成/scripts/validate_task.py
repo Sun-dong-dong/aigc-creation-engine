@@ -37,6 +37,172 @@ def resolve(root, value):
     return (root / value).resolve()
 
 
+def nonempty(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def normalize_shot_id(value):
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r'(?:(?:镜头|镜|shot|s)\s*)?0*(\d+)([A-Za-z]*)', value.strip(), re.I)
+    return (int(match[1]), match[2].upper()) if match else None
+
+
+def literal_in_narrative(value, body, seedance=False):
+    if not nonempty(value):
+        return False
+    speech_pattern = r'\{[^{}]*\}' if seedance else r'<d>.*?</d>'
+    speech = [m.span() for m in re.finditer(speech_pattern, body, re.S)]
+    quoted = [m.span() for m in re.finditer(r'"[^"\n]*"|“[^”]*”|「[^」]*」|『[^』]*』|〖[^〗]*〗', body)]
+    for m in re.finditer(re.escape(value), body):
+        start, end = m.span()
+        if any(start < b and end > a for a, b in speech):
+            continue
+        if any(a <= start and end <= b for a, b in quoted):
+            continue
+        return True
+    return False
+
+
+def task_input_paths(path, task):
+    paths = [path, Path(__file__), BASE / '模型提示词规范.md', BASE / '模型模板/分支配置.json']
+    root = path.parent
+    for key in ('prompt_file', 'delivery_file', 'post_handoff_file', 'plan_file'):
+        if nonempty(task.get(key)):
+            paths.append(resolve(root, task[key]))
+    first = task.get('draft_review', {})
+    if isinstance(first, dict) and nonempty(first.get('path')):
+        paths.append(resolve(root, first['path']))
+    for key in ('source_files', 'references', 'dependency_files'):
+        values = task.get(key, [])
+        if isinstance(values, list):
+            paths.extend(resolve(root, item['path']) for item in values if isinstance(item, dict) and nonempty(item.get('path')))
+    fixed = task.get('fixed_context', {})
+    if isinstance(fixed, dict) and nonempty(fixed.get('path')):
+        paths.append(resolve(root, fixed['path']))
+    profile = json.loads((BASE / '模型模板/分支配置.json').read_text()).get(task.get('profile'), {})
+    if profile.get('template'):
+        paths.append(BASE / profile['template'])
+    return paths
+
+
+def protect_report_output(report, paths):
+    report = Path(report).resolve()
+    for value in paths:
+        target = Path(value).resolve()
+        if report == target or (report.exists() and target.exists() and report.samefile(target)):
+            raise ValueError('校验报告不能覆盖任务、提示词、参考或其他实际输入文件')
+
+
+def check_post_handoff(root, task, sid, source_quote, note, errors):
+    try:
+        handoff = resolve(root, task.get('post_handoff_file')).read_text(encoding='utf-8')
+    except (OSError, ValueError, TypeError):
+        handoff = ''
+    # A transfer must exist in a single row or a single event section, not as
+    # unrelated words scattered across the handoff document.
+    if not all(nonempty(x) for x in (sid, source_quote, note)):
+        errors.append(f'{sid}后期文字转交索引缺失或无法定位同项来源与记录')
+        return
+    rows = [[cell.strip().replace('\\|', '|') for cell in re.split(r'(?<!\\)\|', line.strip()[1:-1])]
+            for line in handoff.splitlines() if line.strip().startswith('|') and line.strip().endswith('|')]
+    row_match = any(any(normalize_shot_id(cell) == normalize_shot_id(sid) for cell in cells)
+                    and note in cells and any(source_quote in cell for cell in cells) for cells in rows)
+    sections = [section for section in re.split(r'(?m)(?=^#{1,6}\s+)', handoff)
+                if not re.search(r'(?m)^\s*\|', section)]
+    shot_pattern = r'(?<![A-Za-z0-9])' + re.escape(sid) + r'(?![A-Za-z0-9])'
+    note_pattern = r'(?<![A-Za-z0-9_-])' + re.escape(note) + r'(?![A-Za-z0-9_-])'
+    section_match = any(re.search(shot_pattern, section) and re.search(note_pattern, section)
+                        and source_quote in section for section in sections)
+    if not row_match and not section_match:
+        errors.append(f'{sid}后期文字转交索引缺失或无法定位同项来源与记录')
+
+
+def check_delivery_and_dependencies(root, task, prompt, errors):
+    try:
+        raw = resolve(root, task.get('delivery_file')).read_bytes()
+        delivery = raw.decode('utf-8')
+    except (OSError, ValueError, TypeError):
+        errors.append('缺少可读取的最终完整交付文件')
+        delivery, raw = '', b''
+    review = task.get('review', {}).get('delivery', {})
+    if (not isinstance(review, dict) or review.get('status') != 'pass'
+            or review.get('sha256') != sha(raw) or not nonempty(review.get('evidence'))):
+        errors.append('最终交付文件尚未实际复核或版本绑定已失效')
+    # The reviewed Markdown contains exactly one model input block.
+    codes = re.findall(r'^```[^\n]*\n(.*?)^```[ \t]*$', delivery, re.M | re.S)
+    if len(codes) != 1 or codes[0].strip() != prompt.strip():
+        errors.append('最终交付须有唯一且与当前提示词一致的完整复制区')
+    # Ignore code blocks when checking the human-facing table.
+    prose = re.sub(r'^```[^\n]*\n.*?^```[ \t]*$', '', delivery, flags=re.M | re.S)
+    tables, current = [], None
+    for line in prose.splitlines():
+        if not line.strip().startswith('|') or not line.strip().endswith('|'):
+            current = None
+            continue
+        cells = [x.strip() for x in re.split(r'(?<!\\)\|', line.strip()[1:-1])]
+        if len(cells) >= 2 and cells[0] == '镜头' and '时间' in cells[1]:
+            current = [cells, [], False]
+            tables.append(current)
+        elif current is not None:
+            if all(re.fullmatch(r':?-+:?', x) for x in cells):
+                current[2] = not current[1]
+            else:
+                current[1].append(cells)
+    if len(tables) != 1:
+        errors.append('最终交付缺少唯一的四列镜头说明表')
+    else:
+        header, rows, separator = tables[0]
+        if not separator:
+            errors.append('最终交付镜头表缺少有效Markdown分隔行')
+        if (len(header) != 4 or header[0] != '镜头' or header[1] not in ('时间', '时间（估算）', '时间（实测）')
+                or header[2:] != ['景别与运镜', '画面、表演和台词']):
+            errors.append('最终交付镜头说明表列数、名称或顺序不符合四列模板')
+        shots = task.get('shots', [])
+        if len(rows) != len(shots) or any(len(r) != 4 or any(not c for c in r) for r in rows):
+            errors.append('最终交付表格存在缺镜、空列或列数错误')
+        else:
+            actual = [normalize_shot_id(r[0]) for r in rows]
+            expected = [normalize_shot_id(s['id']) for s in shots]
+            ordinal = [(i + 1, '') for i in range(len(shots))]
+            if actual != expected and actual != ordinal:
+                errors.append('最终交付表格镜号覆盖或顺序不一致')
+    reference_prose = re.sub(r'[*_`]', '', prose)
+    if not re.search(r'^参考资产\s*[：:]\s*\S[^\n]*$', reference_prose, re.M):
+        errors.append('最终交付缺少实际参考资产说明；无参考时也须说明')
+    dependencies = task.get('dependency_files', [])
+    if not isinstance(dependencies, list):
+        errors.append('非投喂依赖文件清单格式错误')
+        dependencies = []
+    by_path = {}
+    for item in dependencies:
+        if not isinstance(item, dict) or not nonempty(item.get('path')) or not nonempty(item.get('role')):
+            errors.append('非投喂依赖缺少路径或职责')
+            continue
+        if item['path'] in by_path:
+            errors.append('非投喂依赖重复登记')
+        by_path[item['path']] = item
+        try:
+            actual = sha(resolve(root, item['path']).read_bytes())
+        except OSError:
+            actual = None
+        if actual is None or actual != item.get('sha256'):
+            errors.append('非投喂依赖缺失或版本摘要不一致：' + item['path'])
+    context = task.get('continuity_context', {})
+    if not isinstance(context, dict) or type(context.get('applicable')) is not bool or not nonempty(context.get('basis')):
+        errors.append('缺少同场相邻段衔接的适用判断与具体依据')
+    elif context['applicable']:
+        dependency = by_path.get(context.get('dependency_path'))
+        if not dependency:
+            errors.append('同场前段的选用文件或有效分镜未绑定为非投喂依赖')
+        elif dependency['role'] == 'previous_segment_video':
+            at = context.get('frame_time_seconds')
+            if type(at) not in (int, float) or not math.isfinite(at) or at < 0:
+                errors.append('前段尾帧缺少有效的实际取帧位置')
+        elif dependency['role'] not in ('previous_segment_tail_frame', 'previous_segment_storyboard'):
+            errors.append('前段衔接依赖职责不匹配')
+
+
 def inputs(path, task):
     root = path.parent
     prompt = resolve(root, task['prompt_file']).read_text(encoding='utf-8')
@@ -59,7 +225,17 @@ def inputs(path, task):
         fixed_hash = sha(resolve(root, task['fixed_context']['path']).read_bytes())
     except (KeyError, OSError, ValueError, TypeError):
         fixed_hash = None
-    payload.update(actual_fixed_context_sha256=fixed_hash,
+    def optional_hash(value):
+        try:
+            return sha(resolve(root, value).read_bytes())
+        except (OSError, ValueError, TypeError):
+            return None
+    dependencies = {item['path']: optional_hash(item['path'])
+                    for item in task.get('dependency_files', []) if isinstance(item, dict) and isinstance(item.get('path'), str)}
+    payload.update(actual_delivery_sha256=optional_hash(task.get('delivery_file')),
+                   actual_dependency_sha256=dependencies,
+                   actual_post_handoff_sha256=optional_hash(task.get('post_handoff_file')),
+                   actual_fixed_context_sha256=fixed_hash,
                    actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
                    actual_segmentation_sha256=plan_hash,
                    actual_first_draft_sha256=draft_hash,
@@ -340,9 +516,13 @@ def shot_source_blocks(root, sources, bindings, shots, errors, pending):
             continue
         source = resolve(root, name).read_text(encoding='utf-8')
         hits = list(re.finditer(r'^' + re.escape(heading) + r'\s*$', source, re.M))
-        shot_num = re.search(r'\d+', sid)
-        header_num = re.search(r'(?:镜头|镜|shot|s)\s*0*(\d+)', heading, re.I)
-        if len(hits) != 1 or not shot_num or not header_num or int(shot_num[0]) != int(header_num[1]):
+        expected_id = binding.get('source_shot_id', sid)
+        if expected_id != sid and not nonempty(binding.get('mapping_evidence')):
+            errors.append(f'{sid}的源镜号映射缺少具体依据')
+            continue
+        header_num = re.search(r'(?:镜头|镜|shot|s)\s*0*(\d+)([A-Za-z]*)', heading, re.I)
+        header_id = (int(header_num[1]), header_num[2].upper()) if header_num else None
+        if len(hits) != 1 or normalize_shot_id(expected_id) is None or normalize_shot_id(expected_id) != header_id:
             errors.append(f'{sid}的镜头标题无法唯一定位或镜号不符')
             continue
         start = hits[0].start()
@@ -442,9 +622,8 @@ def check_shot_lighting(task, blocks, errors):
             errors.append(f'{sid}缺少逐镜光源、固定色温与人物受光核对')
             continue
         body = blocks.get(sid, '')
-        body = re.sub(r'<d>.*?</d>|\{[^{}]*\}|“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', '', body, flags=re.S)
         def located(value):
-            return isinstance(value, str) and bool(value.strip()) and value in body
+            return literal_in_narrative(value, body, task.get('profile', '').startswith('seedance'))
         for key in ('temperature_quote', 'source_quote'):
             if not located(row.get(key)):
                 errors.append(f'{sid}/{key}缺少本镜非对白正文中的照明证据')
@@ -496,6 +675,7 @@ def validate(path):
         raise ValueError('请求时长必须是有限正数')
     if re.search(r'\{\{|\[待填\]|\[TODO\]|<待填>|```', text):
         errors.append('正文含模板占位符或外层代码围栏')
+    check_delivery_and_dependencies(path.parent, task, text, errors)
     sources = task.get('source_files', [])
     if not sources:
         errors.append('缺少可逐镜对照的分镜来源文件')
@@ -579,6 +759,8 @@ def validate(path):
                     or (deferred and not issue.get('post_note', '').strip())
                     or (not deferred and (not b.strip() or b not in blocks.get(sid, '')))):
                 errors.append(f'{sid}初稿问题的分镜依据或第二版修订证据无法定位')
+            if deferred:
+                check_post_handoff(path.parent, task, sid, a, issue.get('post_note'), errors)
             old = issue.get('draft_quote', '')
             if old and old not in draft:
                 errors.append(f'{sid}初稿问题引用无法定位')
@@ -616,10 +798,13 @@ def validate(path):
             shared = detail.get('scope') == 'shared'
             source_pool = source_text if shared else source_blocks.get(sid, '')
             prompt_pool = text if shared else blocks.get(sid, '')
+            if shared and not nonempty(detail.get('scope_reason')):
+                errors.append(f'{sid}共享关键细节缺少适用范围依据')
             if detail.get('status') == 'deferred_post':
                 if (not detail.get('item', '').strip() or not a.strip() or a not in source_pool
                         or not detail.get('post_note', '').strip()):
                     errors.append(f'{sid}后期文字交接缺少分镜依据或交接记录')
+                check_post_handoff(path.parent, task, sid, a, detail.get('post_note'), errors)
             elif detail.get('status') != 'pass':
                 pending.append(f'{sid}存在未完成的关键细节核对')
             elif (not detail.get('item', '').strip() or not a.strip() or a not in source_pool
@@ -670,7 +855,7 @@ def validate(path):
               'content_review':('invalid_evidence' if len(errors) > before_review_errors else 'recorded_pass' if not content_pending else 'pending'),
               'errors':errors, 'pending':pending,
               'formal_prompt_ready':not errors and not pending,
-              'generation_ready':not errors and not pending and not duration_risk and task.get('authorization', {}).get('generate') is True and bool(task.get('authorization', {}).get('scope')),
+              'generation_ready':not errors and not pending and not duration_risk and task.get('authorization', {}).get('generate') is True and nonempty(task.get('authorization', {}).get('scope')),
               'duration_risk':duration_risk,
               'media_acceptance':'not_evaluated',
               'limits':'格式检查与人工内容记录分开；程序只能核对已登记证据及绑定，不能发现未登记细节或声音需求，也不能证明引用语义、试读真实性、画面或声音效果。'}
@@ -682,6 +867,12 @@ def main():
     parser.add_argument('task', type=Path)
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
+    if args.report:
+        try:
+            task_path, task = read_task(args.task)
+            protect_report_output(args.report, task_input_paths(task_path, task))
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            parser.error(str(exc))
     try:
         report = validate(args.task)
     except (KeyError, ValueError, TypeError, OSError, IndexError, AttributeError, OverflowError) as exc:
@@ -689,6 +880,7 @@ def main():
                   'generation_ready':False, 'media_acceptance':'not_evaluated'}
     output = json.dumps(report, ensure_ascii=False, indent=2)
     if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(output + '\n', encoding='utf-8')
     print(output)
     return 0 if report['formal_prompt_ready'] else 1 if report.get('errors') else 2

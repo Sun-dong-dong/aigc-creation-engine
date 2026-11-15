@@ -24,14 +24,41 @@ def read_task(path):
     return path, task
 
 
-def actual_inputs(path, task):
-    files = {}
-    values = [task.get('prompt_file')] + [r.get('path') for r in task.get('references', []) if isinstance(r, dict) and r.get('path')]
+def actual_input_paths(path, task):
+    values = [task.get('prompt_file')]
+    references = task.get('references', [])
+    if isinstance(references, list):
+        values.extend(r.get('path') for r in references if isinstance(r, dict))
+    paths = {}
     for value in values:
         if not present(value):
             continue
         p = Path(value).expanduser()
-        p = p if p.is_absolute() else path.parent / p
+        paths[value] = p if p.is_absolute() else path.parent / p
+    return paths
+
+
+class ReportCollisionError(ValueError):
+    pass
+
+
+def validate_report_path(report, path, task):
+    report = report.expanduser().resolve()
+    protected = [path, Path(__file__), *actual_input_paths(path, task).values()]
+    for source in protected:
+        if report == source.expanduser().resolve():
+            raise ReportCollisionError('报告不能覆盖任务、检查脚本或实际输入文件')
+        try:
+            collision = report.samefile(source)
+        except FileNotFoundError:
+            collision = False
+        if collision:
+            raise ReportCollisionError('报告不能覆盖任务、检查脚本或实际输入文件（硬链接）')
+
+
+def actual_inputs(path, task):
+    files = {}
+    for value, p in actual_input_paths(path, task).items():
         try:
             files[value] = hashlib.sha256(p.read_bytes()).hexdigest()
         except OSError:
@@ -131,17 +158,27 @@ def main():
     parser.add_argument('--fingerprint', action='store_true')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
-    if args.report and args.report.expanduser().resolve() == args.task.expanduser().resolve():
-        parser.error('报告不能覆盖任务文件')
+    path, task = args.task.expanduser().resolve(), {}
     try:
+        if args.report:
+            validate_report_path(args.report, path, task)
+        path, task = read_task(path)
+        if args.report:
+            validate_report_path(args.report, path, task)
         if args.fingerprint:
-            print(fingerprint(args.task))
+            print(actual_inputs(path, task)[1])
             return 0
-        result = check(args.task)
+        result = check(path)
+    except ReportCollisionError as exc:
+        parser.error(str(exc))
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
         result = {'errors': [str(exc)], 'formal_prompt_ready': False, 'generation_ready': False, 'image_acceptance': 'not_evaluated'}
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.report:
+        try:
+            validate_report_path(args.report, path, task)
+        except ReportCollisionError as exc:
+            parser.error(str(exc))
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(output + '\n', encoding='utf-8')
     print(output)

@@ -21,29 +21,124 @@ def has_body(text):
     return False
 
 
+def filled(value):
+    return value.strip().upper() not in {x.upper() for x in EMPTY}
+
+
+def tables(text):
+    """Yield real Markdown tables, excluding their header and separator rows."""
+    lines = text.splitlines()
+    index = 0
+    while index + 1 < len(lines):
+        def cells(line):
+            line = line.strip()
+            if not (line.startswith('|') and line.endswith('|')):
+                return None
+            return [x.strip() for x in re.split(r'(?<!\\)\|', line[1:-1])]
+        header, separator = cells(lines[index]), cells(lines[index + 1])
+        if not header or not separator or len(header) != len(separator) or not all(
+                re.fullmatch(r':?-+:?', x.replace(' ', '')) for x in separator):
+            index += 1
+            continue
+        index += 2
+        rows = []
+        while index < len(lines):
+            row = cells(lines[index])
+            if row is None:
+                break
+            rows.append(row)
+            index += 1
+        yield header, rows
+
+
+def fields(text):
+    """Read labelled values, including the template's separate value paragraphs."""
+    entries = []
+    label, values, multiline = None, [], False
+    for line in text.splitlines() + ['# end']:
+        stripped = line.strip()
+        match = re.match(r'^(?:[-*]\s+)?([^：:|#]+)[：:]\s*(.*)$', stripped)
+        if match or stripped.startswith(('#', '|')):
+            if label is not None:
+                entries.append((label, '\n'.join(values).strip()))
+            label, values = (match.group(1).strip(), [match.group(2)]) if match else (None, [])
+            # Unindented template instructions or file lists are not values of
+            # empty bullet records. Explicitly indent a record's continuation.
+            multiline = bool(match and not re.match(r'^[-*]\s+', stripped))
+        elif stripped and label is not None and (multiline or line[:1].isspace()):
+            values.append(stripped)
+    # Two-column key/value tables are an equivalent way to carry records.
+    for header, rows in tables(text):
+        if len(header) == 2:
+            entries.extend((row[0], row[1]) for row in rows if len(row) == 2)
+    return entries
+
+
+def shot_column(header):
+    return any(re.search(r'镜号|镜头编号|(?:涉及|对应|关联|服务|出现)镜头', x) for x in header)
+
+
 def asset_rows(text):
-    rows = []
-    in_assets = False
-    columns = 0
-    incomplete = False
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith('|') or not line.endswith('|'):
-            in_assets = False
+    rows, incomplete = [], False
+    for header, data in tables(text):
+        # Equivalent tables may split fields into more than six columns, but must
+        # retain all six information groups rather than merely any six columns.
+        groups = [r'编号|名称|需求项|资产名', r'类型|类别',
+                  r'镜号|镜头编号|(?:涉及|对应|关联|服务|出现)镜头',
+                  r'视角|状态|交互', r'已有|现有', r'缺口|缺失|需落实|需补充']
+        candidates = [{i for i, cell in enumerate(header) if re.search(pattern, cell)}
+                      for pattern in groups]
+
+        def distinct_columns(index=0, used=frozenset()):
+            if index == len(candidates):
+                return True
+            return any(distinct_columns(index + 1, used | {column})
+                       for column in candidates[index] - used)
+
+        # A shot-number column cannot double as asset identity, and the viewing
+        # status of existing material cannot replace the requested asset state.
+        if len(header) < 6 or not distinct_columns():
             continue
-        cells = [x.strip() for x in re.split(r'(?<!\\)\|', line[1:-1])]
-        if all(re.fullmatch(r':?-+:?', x.replace(' ', '')) for x in cells):
-            continue
-        if any(re.fullmatch(r'(?:关联|服务|对应|出现)?镜号(?:[、，/].*)?', x) for x in cells) and any('类型' in x or '类别' in x for x in cells) and any('需求' in x or '资产' in x or '名称' in x for x in cells):
-            columns = len(cells)
-            in_assets = columns >= 6
-            continue
-        if in_assets:
-            if len(cells) != columns or any(x in EMPTY for x in cells):
+        for row in data:
+            if len(row) != len(header) or not all(filled(x) for x in row):
                 incomplete = True
             else:
-                rows.append(cells)
+                rows.append(row)
     return rows, incomplete
+
+
+def has_storyboard_structure(text):
+    # This is minimum populated structure, not a judgement of shot quality or
+    # coverage. Keep source wording intact and accept equivalent shot tables.
+    sections = re.split(r'(?m)^(?=\s*#{1,6}\s+)', text)
+    for section in sections:
+        heading = section.splitlines()[0] if section.splitlines() else ''
+        if not re.search(r'镜头\s*(?:[A-Za-z]*\d+[A-Za-z]*|[一二三四五六七八九十百]+)', heading):
+            continue
+        values = dict(fields(section))
+        if filled(values.get('场景', '')) and filled(values.get('画面内容', '')):
+            return True
+    for header, rows in tables(text):
+        picture = next((i for i, x in enumerate(header) if '画面' in x or '镜内行动' in x), None)
+        if shot_column(header) and picture is not None:
+            shot = next(i for i, x in enumerate(header) if shot_column([x]))
+            if any(len(row) == len(header) and filled(row[shot]) and filled(row[picture])
+                   for row in rows):
+                return True
+    return False
+
+
+def has_handoff_structure(text):
+    entries = [(label, value) for label, value in fields(text) if filled(value)]
+    review = any(re.search(r'检查方式|检查范围|检查结果|复核结论|回查范围|审读.*结果|查看.*结果', label)
+                 for label, _ in entries)
+    for header, rows in tables(text):
+        if any(re.search(r'依据|观察|复核|检查', x) for x in header) and any(
+                re.search(r'处理|结果|结论|状态', x) for x in header):
+            review = review or any(len(row) == len(header) and all(filled(x) for x in row) for row in rows)
+    handoff = any(re.search(r'用户确认|确认依据|确认版本|交接范围|接收范围|交接结论|门禁结论|必须保留|可调整项|未决事项', label)
+                  for label, _ in entries)
+    return review and handoff
 
 
 def check(storyboard, assets, handoff):
@@ -63,6 +158,11 @@ def check(storyboard, assets, handoff):
         if not has_body(text):
             errors.append(f'{labels[role]}缺少实际内容：{path}')
 
+    if 'storyboard' in texts and not has_storyboard_structure(texts['storyboard']):
+        errors.append('分镜定稿缺少已填写的镜头结构；须有实际镜号、场景和画面内容，或含镜号与画面内容的等效分镜表。')
+    if 'handoff' in texts and not has_handoff_structure(texts['handoff']):
+        errors.append('复核与交接缺少已填写的检查记录及确认或交接记录；模板说明、空表头及文件名不算记录。')
+
     if 'assets' in texts:
         rows, incomplete = asset_rows(texts['assets'])
         if not rows:
@@ -81,7 +181,7 @@ def check(storyboard, assets, handoff):
         'files': files,
         'errors': errors,
         'content_review': 'required_separately',
-        'check_scope': '文件可读性、资产表填写、当前文件名引用及文件摘要；逐镜覆盖、确认依据与制作适配另行复核。',
+        'check_scope': '文件可读性、分镜及交接最低有效结构、资产表信息组与填写、当前文件名引用及文件摘要；内容真实性、逐镜覆盖、确认依据与制作适配另行复核。',
     }
 
 
@@ -93,8 +193,9 @@ def main():
     parser.add_argument('--report', help='保存JSON检查报告')
     args = parser.parse_args()
     inputs = [Path(x).expanduser().resolve() for x in (args.storyboard, args.assets, args.handoff)]
-    if args.report and Path(args.report).expanduser().resolve() in inputs:
-        parser.error('报告不能覆盖输入文件')
+    report = Path(args.report).expanduser().resolve() if args.report else None
+    if report and any(report == source or (report.exists() and source.exists() and report.samefile(source)) for source in inputs):
+        parser.error('报告不能覆盖输入文件或其路径别名')
     result = check(*inputs)
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.report:
