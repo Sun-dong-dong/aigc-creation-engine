@@ -55,7 +55,12 @@ def inputs(path, task):
         draft_hash = sha(resolve(root, task['draft_review']['path']).read_bytes())
     except (KeyError, OSError, ValueError, TypeError):
         draft_hash = None
-    payload.update(actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
+    try:
+        fixed_hash = sha(resolve(root, task['fixed_context']['path']).read_bytes())
+    except (KeyError, OSError, ValueError, TypeError):
+        fixed_hash = None
+    payload.update(actual_fixed_context_sha256=fixed_hash,
+                   actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
                    actual_segmentation_sha256=plan_hash,
                    actual_first_draft_sha256=draft_hash,
                    actual_template_sha256=sha(template.read_bytes()), profile_contract=profile,
@@ -189,8 +194,8 @@ def h3_format(text, task, errors):
     protected = re.sub(r'<d>.*?</d>|"[^"\n]*"', '', text, flags=re.S)
     if re.search(r'[\u4e00-\u9fff]', protected):
         errors.append('H3非对白或画内文字部分应使用英文')
-    if 'No on-screen text.' not in re.sub(r'<d>.*?</d>|"[^"\n]*"', '', body, flags=re.S):
-        errors.append('H3画面描述缺少无画面文字要求：No on-screen text.')
+    if 'No on-screen text. No subtitles. No background music.' not in re.sub(r'<d>.*?</d>|"[^"\n]*"', '', body, flags=re.S):
+        errors.append('H3画面描述缺少固定无字无字幕无配乐要求')
     if re.search(r'\b(?:on[- ]screen text|subtitle|caption)\s+(?:reads|says|displays|shows|appears)\b', body, re.I):
         errors.append('H3画面描述包含显示文字的指令，需交给后期')
     if sections.get('non_diegetic_music') != 'N/A':
@@ -347,10 +352,91 @@ def shot_source_blocks(root, sources, bindings, shots, errors, pending):
     return blocks
 
 
+def check_fixed_context(root, task, text, errors):
+    """Check exact approved project/scene text; semantic scope is reviewed separately."""
+    binding = task.get('fixed_context')
+    if not isinstance(binding, dict):
+        errors.append('缺少项目固定描述绑定 fixed_context')
+        return
+    try:
+        data = resolve(root, binding.get('path')).read_bytes()
+        fixed = json.loads(data)
+    except (OSError, ValueError, TypeError):
+        errors.append('项目固定描述文件不可读取或不是有效JSON')
+        return
+    if not isinstance(fixed, dict):
+        errors.append('项目固定描述必须为JSON对象')
+        return
+    if binding.get('sha256') != sha(data):
+        errors.append('项目固定描述摘要不一致，须读取当前版本重新核对')
+    for key in ('project_id', 'version'):
+        if (not isinstance(fixed.get(key), str) or not fixed[key].strip()
+                or binding.get(key) != fixed[key]):
+            errors.append('项目固定描述的项目或版本不匹配：' + key)
+    def nonempty(value):
+        return isinstance(value, str) and bool(value.strip())
+    if fixed.get('confirmed') is not True or not nonempty(fixed.get('confirmation_evidence')):
+        errors.append('项目固定画风缺少真实确认记录')
+    if binding.get('reviewed') is not True or not nonempty(binding.get('review_evidence')):
+        errors.append('未记录固定描述适用范围及冲突的实际复核')
+    profile = task.get('profile')
+    if profile in ('h3-base', 'h3-ref'):
+        field = 'detailed_description' if profile == 'h3-ref' else 'integrated_multimodal_description'
+        match = re.search(r'^' + field + r':[ \t]*(.*?)(?=^[a-z_]+:|\Z)', text, re.M | re.S)
+        narrative = match.group(1) if match else ''
+        speech_spans = [m.span() for m in re.finditer(r'<d>.*?</d>', narrative, re.S)]
+    else:
+        narrative = text
+        speech_spans = [m.span() for m in re.finditer(r'\{[^{}]*\}', narrative)]
+    quoted_spans = [m.span() for m in re.finditer(r'〖[^〗]*〗|“[^”]*”|\"[^\"\n]*\"|「[^」]*」|『[^』]*』', narrative)]
+    def in_narrative(value):
+        for occurrence in re.finditer(re.escape(value), narrative):
+            start, end = occurrence.span()
+            if any(start < b and end > a for a, b in speech_spans):
+                continue
+            if any(a <= start and end <= b for a, b in quoted_spans):
+                continue
+            return True
+        return False
+    def require_text(mapping, name):
+        value = mapping.get(profile) if isinstance(mapping, dict) else None
+        if not isinstance(value, str) or not value.strip():
+            errors.append(name + '缺少本模型分支的固定描述')
+        elif value != value.strip():
+            errors.append(name + '固定描述首尾须去掉空白')
+        elif not in_narrative(value):
+            errors.append(name + '固定描述未完整原样写入提示词')
+    require_text(fixed.get('styles'), '项目画风')
+    scene_ids = binding.get('scene_ids')
+    if (not isinstance(scene_ids, list)
+            or any(not isinstance(i, str) or not i.strip() for i in scene_ids)
+            or len(set(scene_ids)) != len(scene_ids)):
+        errors.append('场景状态清单非法或重复')
+        return
+    if not scene_ids and not nonempty(binding.get('scene_omission_reason')):
+        errors.append('未声明本次适用场景状态或具体不适用依据')
+    scenes = fixed.get('scenes', [])
+    if not isinstance(scenes, list) or any(not isinstance(i, dict) for i in scenes):
+        errors.append('固定描述场景表格式错误')
+        return
+    for scene_id in scene_ids:
+        matches = [i for i in scenes if i.get('id') == scene_id]
+        if len(matches) != 1:
+            errors.append('场景状态不存在或重复：' + scene_id)
+            continue
+        scene = matches[0]
+        if (scene.get('confirmed') is not True
+                or not nonempty(scene.get('confirmation_evidence'))
+                or not nonempty(scene.get('applies_to'))):
+            errors.append('场景状态未确认或缺少适用范围：' + scene_id)
+        require_text(scene.get('texts'), '场景 ' + scene_id)
+
+
 def validate(path):
     path, task = read_task(path)
     text, profile, filehashes, digest = inputs(path, task)
     errors, pending = [], []
+    check_fixed_context(path.parent, task, text, errors)
     if profile['official_verified'] is not True or task['mode'] not in profile['modes']:
         errors.append('没有对应的已核实官方模板分支')
     if sha((BASE / profile['template']).read_bytes()) != profile['template_sha256']:

@@ -4,7 +4,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/H3-基础.md",
-    "template_sha256": "c0492d4ee1a506074dc2a879f311b62da17900c4aba5ec8d7c1966149cac73df",
+    "template_sha256": "1a8e6fb1f22645391a1f71cbfb0ad7470b6e098daaa20179344adb4f46f4e0c6",
     "modes": [
       "T2VA",
       "I2VA",
@@ -24,7 +24,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/H3-全参考.md",
-    "template_sha256": "0fab42685381797e6b866679a00f211004ea162cf927805efc40dce224891b19",
+    "template_sha256": "028a94c1034f8f06c94dde2ed5e444c6bf406739addeb8c8328225eeb2fba4a5",
     "modes": [
       "Ref2VA"
     ],
@@ -42,7 +42,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/即梦2.0.md",
-    "template_sha256": "e3b1b1a70a1225c8fcc019779ff5aadfc0cc35afa600c863fcbca47663c75750",
+    "template_sha256": "b016dbd1a65ecaa6e20faa6b6021be99cc230bee50b51ecb8c023bac0ce2a93e",
     "modes": [
       "T2V",
       "R2V"
@@ -60,7 +60,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/即梦2.5.md",
-    "template_sha256": "9c2d6fed8b4292467405e7fdf37592db323b25d8c87a6f12e0dfe962fa32da37",
+    "template_sha256": "33af2381c44aa5c6c831171e4ecb2a3cdd2a9e24c95a78d5494685e80eddeb7b",
     "modes": [
       "T2V",
       "R2V"

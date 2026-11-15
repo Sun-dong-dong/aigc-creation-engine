@@ -68,5 +68,15 @@
     "detail_checks": {},
     "coverage": {},
     "judgments": {}
+  },
+  "fixed_context": {
+    "path": "../../G2-导演与视听设计/项目固定描述.json",
+    "sha256": "待填",
+    "project_id": "",
+    "version": "",
+    "scene_ids": [],
+    "scene_omission_reason": "",
+    "reviewed": false,
+    "review_evidence": ""
   }
 }
