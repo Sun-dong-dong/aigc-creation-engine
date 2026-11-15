@@ -1,0 +1,43 @@
+{
+  "task_id": "待填",
+  "profile": "h3-base",
+  "mode": "T2VA",
+  "entry": "h3-native-prompt",
+  "sound_policy": "sound",
+  "prompt_file": "提示词.txt",
+  "source_files": [
+    {
+      "path": "分镜.md",
+      "sha256": "待填"
+    }
+  ],
+  "references": [],
+  "shots": [
+    {
+      "id": "镜号",
+      "dialogue": []
+    }
+  ],
+  "parameters": {
+    "duration": 0,
+    "aspect_ratio": "待填",
+    "audio": true
+  },
+  "official_reads": [],
+  "runtime": {
+    "verified": false,
+    "checked_at": "",
+    "evidence": ""
+  },
+  "authorization": {
+    "generate": false,
+    "scope": ""
+  },
+  "review": {
+    "fingerprint": "",
+    "reviewer": "",
+    "reviewed_at": "",
+    "coverage": {},
+    "judgments": {}
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "h3-base": {
+    "family": "h3",
+    "official_verified": true,
+    "verified_at": "2026-11-15",
+    "template": "模型模板/H3-基础.md",
+    "template_sha256": "c0492d4ee1a506074dc2a879f311b62da17900c4aba5ec8d7c1966149cac73df",
+    "modes": [
+      "T2VA",
+      "I2VA",
+      "FL2VA",
+      "L2VA"
+    ],
+    "entries": [
+      "h3-native-prompt"
+    ],
+    "official_urls": [
+      "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md"
+    ],
+    "contract_scope": "提示词结构，实际入口和参数另行核实"
+  },
+  "h3-ref": {
+    "family": "h3",
+    "official_verified": true,
+    "verified_at": "2026-11-15",
+    "template": "模型模板/H3-全参考.md",
+    "template_sha256": "0fab42685381797e6b866679a00f211004ea162cf927805efc40dce224891b19",
+    "modes": [
+      "Ref2VA"
+    ],
+    "entries": [
+      "h3-native-prompt"
+    ],
+    "official_urls": [
+      "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
+      "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md"
+    ],
+    "contract_scope": "提示词结构，实际入口和参数另行核实"
+  },
+  "seedance-2.0": {
+    "family": "seedance",
+    "official_verified": true,
+    "verified_at": "2026-11-15",
+    "template": "模型模板/即梦2.0.md",
+    "template_sha256": "e3b1b1a70a1225c8fcc019779ff5aadfc0cc35afa600c863fcbca47663c75750",
+    "modes": [
+      "T2V",
+      "R2V"
+    ],
+    "entries": [
+      "jimeng-web"
+    ],
+    "official_urls": [
+      "https://docs.volcengine.com/docs/ark/seedance-2-0-prompt-guide?lang=zh"
+    ],
+    "contract_scope": "提示词结构，实际入口和参数另行核实"
+  },
+  "seedance-2.5": {
+    "family": "seedance",
+    "official_verified": true,
+    "verified_at": "2026-11-15",
+    "template": "模型模板/即梦2.5.md",
+    "template_sha256": "9c2d6fed8b4292467405e7fdf37592db323b25d8c87a6f12e0dfe962fa32da37",
+    "modes": [
+      "T2V",
+      "R2V"
+    ],
+    "entries": [
+      "jimeng-web"
+    ],
+    "official_urls": [
+      "https://docs.volcengine.com/docs/ark/seedance-2-5-prompt-guide?lang=zh"
+    ],
+    "contract_scope": "提示词结构，实际入口和参数另行核实"
+  }
+}
