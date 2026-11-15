@@ -432,6 +432,47 @@ def check_fixed_context(root, task, text, errors):
         require_text(scene.get('texts'), '场景 ' + scene_id)
 
 
+def check_shot_lighting(task, blocks, errors):
+    """Verify located evidence, not physical lighting or completeness of character enumeration."""
+    rows = task.get('review', {}).get('lighting', {})
+    for shot in task.get('shots', []):
+        sid = shot['id']
+        row = rows.get(sid) if isinstance(rows, dict) else None
+        if not isinstance(row, dict):
+            errors.append(f'{sid}缺少逐镜光源、固定色温与人物受光核对')
+            continue
+        body = blocks.get(sid, '')
+        body = re.sub(r'<d>.*?</d>|\{[^{}]*\}|“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', '', body, flags=re.S)
+        def located(value):
+            return isinstance(value, str) and bool(value.strip()) and value in body
+        for key in ('temperature_quote', 'source_quote'):
+            if not located(row.get(key)):
+                errors.append(f'{sid}/{key}缺少本镜非对白正文中的照明证据')
+        quote = row.get('temperature_quote', '')
+        if not isinstance(quote, str) or not re.search(r'(?<![\d.])[1-9]\d{2,4}(?:\.\d+)?\s*[Kk](?![A-Za-z0-9])', quote):
+            errors.append(f'{sid}色温须包含已确定的明确K值')
+        if not isinstance(row.get('basis'), str) or not row['basis'].strip():
+            errors.append(f'{sid}缺少照明设定及可见人物覆盖的实际核对依据')
+        present, characters = row.get('characters_present'), row.get('characters')
+        if type(present) is not bool or not isinstance(characters, list):
+            errors.append(f'{sid}人物受光记录格式不完整')
+            continue
+        if (present and not characters) or (not present and characters):
+            errors.append(f'{sid}可见人物状态与受光清单不一致')
+        seen = set()
+        for item in characters:
+            if not isinstance(item, dict):
+                errors.append(f'{sid}人物受光条目格式错误')
+                continue
+            subject = item.get('subject')
+            if not isinstance(subject, str) or not subject.strip() or subject in seen:
+                errors.append(f'{sid}人物受光缺主体或重复')
+            else:
+                seen.add(subject)
+            if not located(item.get('prompt_quote')):
+                errors.append(f'{sid}缺少本镜人物具体受光的正文证据')
+
+
 def validate(path):
     path, task = read_task(path)
     text, profile, filehashes, digest = inputs(path, task)
@@ -499,6 +540,7 @@ def validate(path):
         if task['mode'] == 'R2V' and not refs:
             errors.append('参考模式缺少真实参考')
         blocks, _ = seedance_format(text, task, errors)
+    check_shot_lighting(task, blocks, errors)
     format_errors = list(errors)
     before_review_errors = len(errors)
     review = task.get('review', {})

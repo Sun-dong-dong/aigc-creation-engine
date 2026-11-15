@@ -67,7 +67,8 @@
     "source_bindings": {},
     "detail_checks": {},
     "coverage": {},
-    "judgments": {}
+    "judgments": {},
+    "lighting": {}
   },
   "fixed_context": {
     "path": "../../G2-导演与视听设计/项目固定描述.json",
