@@ -136,6 +136,7 @@ def check_delivery_and_dependencies(root, task, prompt, errors):
     # Ignore code blocks when checking the human-facing table.
     prose = re.sub(r'^```[^\n]*\n.*?^```[ \t]*$', '', delivery, flags=re.M | re.S)
     tables, current = [], None
+    delivery_rows = {}
     for line in prose.splitlines():
         if not line.strip().startswith('|') or not line.strip().endswith('|'):
             current = None
@@ -167,6 +168,8 @@ def check_delivery_and_dependencies(root, task, prompt, errors):
             ordinal = [(i + 1, '') for i in range(len(shots))]
             if actual != expected and actual != ordinal:
                 errors.append('最终交付表格镜号覆盖或顺序不一致')
+            else:
+                delivery_rows = {shot['id']: row[3] for shot, row in zip(shots, rows)}
     reference_prose = re.sub(r'[*_`]', '', prose)
     if not re.search(r'^参考资产\s*[：:]\s*\S[^\n]*$', reference_prose, re.M):
         errors.append('最终交付缺少实际参考资产说明；无参考时也须说明')
@@ -201,6 +204,7 @@ def check_delivery_and_dependencies(root, task, prompt, errors):
                 errors.append('前段尾帧缺少有效的实际取帧位置')
         elif dependency['role'] not in ('previous_segment_tail_frame', 'previous_segment_storyboard'):
             errors.append('前段衔接依赖职责不匹配')
+    return delivery_rows
 
 
 def inputs(path, task):
@@ -612,7 +616,7 @@ def check_fixed_context(root, task, text, errors):
         require_text(scene.get('texts'), '场景 ' + scene_id)
 
 
-def check_shot_lighting(task, blocks, errors):
+def check_shot_lighting(task, blocks, errors, delivery_rows=None):
     """Verify located evidence, not physical lighting or completeness of character enumeration."""
     rows = task.get('review', {}).get('lighting', {})
     for shot in task.get('shots', []):
@@ -630,6 +634,15 @@ def check_shot_lighting(task, blocks, errors):
         quote = row.get('temperature_quote', '')
         if not isinstance(quote, str) or not re.search(r'(?<![\d.])[1-9]\d{2,4}(?:\.\d+)?\s*[Kk](?![A-Za-z0-9])', quote):
             errors.append(f'{sid}色温须包含已确定的明确K值')
+        if delivery_rows is not None:
+            table_body = delivery_rows.get(sid, '')
+            temperature_pattern = r'(?<![\d.])([1-9]\d{2,4}(?:\.\d+)?)\s*[Kk](?![A-Za-z0-9])'
+            model_temperatures = {float(v) for v in re.findall(temperature_pattern, quote)} if isinstance(quote, str) else set()
+            table_temperatures = {float(v) for v in re.findall(temperature_pattern, table_body)}
+            if not table_temperatures:
+                errors.append(f'{sid}中文镜头表本镜末列缺少独立照明与固定色温，不得用公共段或其他镜头代替')
+            elif not model_temperatures <= table_temperatures:
+                errors.append(f'{sid}中文镜头表未完整承接本镜照明记录的固定色温')
         if not isinstance(row.get('basis'), str) or not row['basis'].strip():
             errors.append(f'{sid}缺少照明设定及可见人物覆盖的实际核对依据')
         present, characters = row.get('characters_present'), row.get('characters')
@@ -675,7 +688,7 @@ def validate(path):
         raise ValueError('请求时长必须是有限正数')
     if re.search(r'\{\{|\[待填\]|\[TODO\]|<待填>|```', text):
         errors.append('正文含模板占位符或外层代码围栏')
-    check_delivery_and_dependencies(path.parent, task, text, errors)
+    delivery_rows = check_delivery_and_dependencies(path.parent, task, text, errors)
     sources = task.get('source_files', [])
     if not sources:
         errors.append('缺少可逐镜对照的分镜来源文件')
@@ -720,7 +733,7 @@ def validate(path):
         if task['mode'] == 'R2V' and not refs:
             errors.append('参考模式缺少真实参考')
         blocks, _ = seedance_format(text, task, errors)
-    check_shot_lighting(task, blocks, errors)
+    check_shot_lighting(task, blocks, errors, delivery_rows)
     format_errors = list(errors)
     before_review_errors = len(errors)
     review = task.get('review', {})

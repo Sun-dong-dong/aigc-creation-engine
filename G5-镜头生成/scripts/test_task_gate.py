@@ -201,6 +201,46 @@ class GateTests(unittest.TestCase):
         g.check_shot_lighting(t, {'S01': '<d>[English] ' + light + '</d>'}, errors)
         self.assertTrue(errors)
 
+    def test_every_shot_needs_lighting_in_both_table_and_model_body(self):
+        self.write('source.md', (self.root / 'source.md').read_text() + '\n## 镜头02\nThe man sits. ' + self.light)
+        self.prompt = self.prompt.replace('\noverall_soundscape:', '\n[Shot 2] At 00:02.500, the camera cuts to a close shot. The man sits. ' + self.light + '\noverall_soundscape:')
+        self.write('prompt.txt', self.prompt)
+        self.write('draft.txt', self.prompt)
+        self.task['source_files'][0]['sha256'] = self.hash('source.md')
+        self.task['draft_review']['sha256'] = self.hash('draft.txt')
+        self.task['shots'].append({'id': 'S02', 'dialogue': []})
+        self.task['draft_review']['reviewed_shots'].append('S02')
+        review = self.task['review']
+        review['source_bindings']['S02'] = {'path': 'source.md', 'heading': '## 镜头02'}
+        for field in ['coverage', 'detail_checks', 'lighting']:
+            review[field]['S02'] = copy.deepcopy(review[field]['S01'])
+        self.write('plan.json', {'scope_shots': ['S01', 'S02'], 'source_sha256': [self.hash('source.md')],
+            'groups': [{'id': 'A', 'shots': ['S01', 'S02'], 'duration': 5, 'reason': 'Continuous test action.'}],
+            'boundaries': [{'left': 'S01', 'right': 'S02', 'decision': 'merge', 'reason': 'Continuous test space.'}]})
+        row2 = '| 2 | 2.5—5秒 | 近景，固定 | 男子坐着，窗光5600K照亮左脸。无台词。 |'
+        good = self.delivery[:self.delivery.index('```text')] + '```text\n' + self.prompt + '\n```\n'
+        good = good.replace('\n\n**参考资产', '\n' + row2 + '\n\n**参考资产', 1)
+        def bind_delivery(value):
+            self.write('delivery.md', value)
+            review['delivery']['sha256'] = self.hash('delivery.md')
+            self.save()
+        bind_delivery(good)
+        self.assertTrue(self.report()['formal_prompt_ready'], self.report())
+        # Global/table-first-row light cannot stand in for the second table row.
+        bad = good.replace(row2, '| 2 | 2.5—5秒 | 近景，固定 | 男子坐着，无台词。 |')
+        bad = '公共照明：窗光5600K照亮左脸。\n' + bad
+        bind_delivery(bad)
+        r = self.report()
+        self.assertFalse(r['formal_prompt_ready'])
+        self.assertTrue(any('S02' in e and '中文镜头表' in e for e in r['errors']))
+        # A complete Chinese table cannot mask a missing English per-shot clause.
+        missing = self.prompt.replace('The man sits. ' + self.light + '\noverall_soundscape:', 'The man sits.\noverall_soundscape:')
+        self.write('prompt.txt', missing)
+        bind_delivery(good.replace(self.prompt, missing))
+        r = self.report()
+        self.assertFalse(r['formal_prompt_ready'])
+        self.assertTrue(any('S02' in e and '照明证据' in e for e in r['errors']))
+
     def test_report_collision_cli_never_changes_inputs(self):
         self.write('previous.bin', 'previous')
         self.task['dependency_files'] = [{'path': 'previous.bin', 'sha256': self.hash('previous.bin'), 'role': 'audit'}]
