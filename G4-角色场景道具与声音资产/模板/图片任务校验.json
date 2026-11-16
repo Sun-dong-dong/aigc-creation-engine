@@ -2,13 +2,23 @@
   "asset_id": "待填",
   "kind": "character_face",
   "aspect_ratio": "3:4",
+  "requested_aspect_ratio": "3:4",
   "model": {
     "name": "待填",
     "version": "待填",
+    "version_status": "exposed",
+    "version_unavailable_reason": "",
     "mode": "待填",
     "entry": "待填",
     "official_url": "",
-    "official_evidence": ""
+    "official_evidence": "",
+    "spec_source": {
+      "kind": "official_document",
+      "tool_name": "",
+      "path": "",
+      "sha256": "",
+      "evidence": ""
+    }
   },
   "prompt_file": "提示词.txt",
   "references": [],

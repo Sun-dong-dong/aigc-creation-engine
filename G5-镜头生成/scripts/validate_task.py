@@ -251,7 +251,7 @@ def inputs(path, task):
                    actual_dependency_sha256=dependencies,
                    actual_post_handoff_sha256=optional_hash(task.get('post_handoff_file')),
                    actual_fixed_context_sha256=fixed_hash,
-                   actual_prompt_sha256=sha(prompt.encode()), actual_files=files,
+                   actual_prompt_sha256=sha(resolve(root, task['prompt_file']).read_bytes()), actual_files=files,
                    actual_segmentation_sha256=plan_hash,
                    actual_first_draft_sha256=draft_hash,
                    actual_template_sha256=sha(template.read_bytes()), profile_contract=profile,
@@ -752,14 +752,23 @@ def validate(path):
     review = task.get('review', {})
     source_blocks = shot_source_blocks(path.parent, sources, review.get('source_bindings', {}), shots, errors, pending)
     first = task.get('draft_review', {})
+    disposition = first.get('disposition', 'revised')
+    if disposition not in ('revised', 'accepted_unchanged'):
+        errors.append('初稿处置须为revised或accepted_unchanged')
     draft = ''
+    draft_bytes = None
     try:
         first_path = resolve(path.parent, first.get('path'))
-        if first_path == resolve(path.parent, task['prompt_file']):
-            errors.append('初稿与第二版必须分别保存')
-        draft = first_path.read_text(encoding='utf-8')
-        if first.get('sha256') != sha(draft.encode()):
+        prompt_path = resolve(path.parent, task['prompt_file'])
+        same_file = first_path == prompt_path or first_path.samefile(prompt_path)
+        if same_file and disposition != 'accepted_unchanged':
+            errors.append('有修订或未明确无变动接纳时，初稿与当前完整修订版必须分别保存')
+        draft_bytes = first_path.read_bytes()
+        draft = draft_bytes.decode('utf-8')
+        if first.get('sha256') != sha(draft_bytes):
             errors.append('初稿摘要不一致，须重新检查初稿')
+        if disposition == 'accepted_unchanged' and draft_bytes != prompt_path.read_bytes():
+            errors.append('无变动晋级要求已审初稿与当前提示词字节完全一致')
     except (OSError, ValueError, TypeError):
         pending.append('缺少可读取的初稿及其复检记录')
     if (first.get('completed') is not True or not first.get('reviewer')
@@ -771,6 +780,15 @@ def validate(path):
     if first.get('reviewed_shots') != [s['id'] for s in shots]:
         pending.append('初稿复检尚未覆盖本段全部镜头')
     issues = first.get('issues')
+    if disposition == 'accepted_unchanged':
+        if issues != []:
+            errors.append('无变动晋级要求issues明确为空数组；有问题须走完整修订版流程')
+        if (first.get('completed') is not True
+                or first.get('review_method') != 'independent_subagent'
+                or not all(nonempty(first.get(key)) for key in
+                           ('reviewer', 'reviewed_at', 'summary', 'review_evidence'))
+                or first.get('reviewed_shots') != [s['id'] for s in shots]):
+            pending.append('无变动晋级须有覆盖全部镜头的完整独立子代理复检记录')
     if not isinstance(issues, list):
         pending.append('缺少初稿问题记录；无问题须明确记录空数组')
     else:
@@ -784,14 +802,14 @@ def validate(path):
             if (not a.strip() or a not in source_blocks[sid]
                     or (deferred and not issue.get('post_note', '').strip())
                     or (not deferred and (not b.strip() or b not in blocks.get(sid, '')))):
-                errors.append(f'{sid}初稿问题的分镜依据或第二版修订证据无法定位')
+                errors.append(f'{sid}初稿问题的分镜依据或当前修订证据无法定位')
             if deferred:
                 check_post_handoff(path.parent, task, sid, a, issue.get('post_note'), errors)
             old = issue.get('draft_quote', '')
             if old and old not in draft:
                 errors.append(f'{sid}初稿问题引用无法定位')
             if issue.get('resolved') is not True:
-                pending.append(f'{sid}初稿问题尚未在第二版解决')
+                pending.append(f'{sid}初稿问题尚未在当前修订版解决')
     if review.get('fingerprint') != digest:
         pending.append('缺少对应当前输入指纹的内容复核，或原复核已失效')
     if not review.get('reviewer') or not review.get('reviewed_at'):

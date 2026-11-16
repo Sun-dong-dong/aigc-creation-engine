@@ -26,6 +26,12 @@ def read_task(path):
 
 def actual_input_paths(path, task):
     values = [task.get('prompt_file')]
+    model = task.get('model', {})
+    source = model.get('spec_source', {}) if isinstance(model, dict) else {}
+    if isinstance(source, dict):
+        # Declared schema files are inputs even if their task record is invalid.
+        # Bind their actual bytes and protect them from report output collisions.
+        values.append(source.get('path'))
     references = task.get('references', [])
     if isinstance(references, list):
         values.extend(r.get('path') for r in references if isinstance(r, dict))
@@ -75,6 +81,48 @@ def fingerprint(path):
     return actual_inputs(path, task)[1]
 
 
+def check_model_spec(path, model, files, errors):
+    if not isinstance(model, dict) or any(not present(model.get(k)) for k in ('name', 'mode', 'entry')):
+        errors.append('缺少实际模型或工具名称、模式与入口')
+        return
+    source = model.get('spec_source', {})
+    if not isinstance(source, dict):
+        errors.append('模型或工具规范依据格式无效')
+        return
+    source_kind = source.get('kind', 'official_document')
+    if source_kind == 'official_document':
+        if any(not present(model.get(k)) for k in ('version', 'official_url', 'official_evidence')):
+            errors.append('缺少实际模型版本或官方模板依据')
+        elif not model['official_url'].startswith('https://'):
+            errors.append('官方模板须记录可定位的HTTPS来源')
+        return
+    if source_kind != 'managed_tool_schema':
+        errors.append('未支持的模型或工具规范依据类型')
+        return
+    if (not present(source.get('tool_name')) or source.get('tool_name') != model['name']
+            or not present(source.get('evidence'))):
+        errors.append('受管工具须记录匹配的实际工具名及接口核对依据')
+    schema_path = source.get('path')
+    if not present(schema_path) or files.get(schema_path) is None or files.get(schema_path) != source.get('sha256'):
+        errors.append('受管工具schema不可读取或文件摘要不匹配')
+    else:
+        target = Path(schema_path).expanduser()
+        target = target if target.is_absolute() else path.parent / target
+        try:
+            schema = json.loads(target.read_text(encoding='utf-8'))
+        except (OSError, ValueError, UnicodeError):
+            schema = None
+        if (not isinstance(schema, dict) or schema.get('tool') != source.get('tool_name')
+                or not present(schema.get('provenance')) or not isinstance(schema.get('input'), dict)
+                or not schema['input']):
+            errors.append('受管工具schema记录须包含匹配工具名、实际来源与非空输入声明')
+    if not present(model.get('version')):
+        if model.get('version_status') != 'not_exposed' or not present(model.get('version_unavailable_reason')):
+            errors.append('未公开底层版本时须明确not_exposed及具体原因，不得猜填版本')
+    elif model.get('version_status') == 'not_exposed':
+        errors.append('版本未公开状态与已填写版本冲突')
+
+
 def check(path):
     path, task = read_task(path)
     files, digest = actual_inputs(path, task)
@@ -82,13 +130,14 @@ def check(path):
     kind, asset_id = task.get('kind'), task.get('asset_id')
     if kind not in KINDS or not present(asset_id):
         errors.append('缺少有效的图片任务类型或资产标识')
-    if not present(task.get('aspect_ratio')):
-        errors.append('缺少实际画幅')
+    requested_ratio = task.get('requested_aspect_ratio', task.get('aspect_ratio'))
+    if not present(requested_ratio):
+        errors.append('缺少请求目标画幅')
+    if (present(task.get('aspect_ratio')) and present(task.get('requested_aspect_ratio'))
+            and task['aspect_ratio'] != task['requested_aspect_ratio']):
+        errors.append('兼容画幅字段与requested_aspect_ratio请求目标不一致')
     model = task.get('model', {})
-    if not isinstance(model, dict) or any(not present(model.get(k)) for k in ('name', 'version', 'mode', 'entry', 'official_url', 'official_evidence')):
-        errors.append('缺少实际模型、版本、模式、入口或官方模板依据')
-    elif not model['official_url'].startswith('https://'):
-        errors.append('官方模板须记录可定位的HTTPS来源')
+    check_model_spec(path, model, files, errors)
     prompt = task.get('prompt_file')
     if not present(prompt) or files.get(prompt) is None:
         errors.append('缺少可读取的本次完整提示词')
@@ -128,8 +177,8 @@ def check(path):
     if rules and not present(override.get('user_instruction')):
         errors.append('例外缺少用户本次明确指令')
         rules = []
-    if kind in RATIOS and task.get('aspect_ratio') != RATIOS[kind] and 'ratio' not in rules:
-        errors.append('人物图片画幅与当前步骤不符')
+    if kind in RATIOS and requested_ratio != RATIOS[kind] and 'ratio' not in rules:
+        errors.append('人物图片请求画幅与当前步骤不符')
     for role in DEPENDENCIES.get(kind, ()):
         exception = 'scene_base' if role == 'scene_base' else 'character_sequence'
         if role not in valid_roles and exception not in rules:
@@ -149,7 +198,7 @@ def check(path):
     return {'fingerprint': digest, 'actual_files': files, 'errors': errors, 'pending': pending,
             'formal_prompt_ready': ready, 'generation_ready': ready and allowed,
             'image_acceptance': 'not_evaluated',
-            'limits': '检查记录与输入版本绑定；用户确认真伪、官方依据内容、实际图像和审美须另行核对。'}
+            'limits': '检查记录与输入版本绑定；工具schema文件和名称匹配不证明其确为当前真实接口。用户确认真伪、官方依据或工具声明实际内容、请求画幅的可控性、输出尺寸与图像审美须另行核对。'}
 
 
 def main():

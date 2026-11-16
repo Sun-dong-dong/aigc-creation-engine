@@ -6,6 +6,7 @@
   "sound_policy": "sound",
   "prompt_file": "提示词.txt",
   "draft_review": {
+    "disposition": "revised",
     "path": "初稿.txt",
     "sha256": "待填",
     "completed": false,
