@@ -66,14 +66,14 @@
     "reviewed_at": "",
     "source_bindings": {},
     "detail_checks": {},
-    "coverage": {},
     "judgments": {},
     "lighting": {},
     "delivery": {
       "status": "pending",
       "sha256": "",
       "evidence": ""
-    }
+    },
+    "shot_reviews": {}
   },
   "fixed_context": {
     "path": "../../G2-导演与视听设计/项目固定描述.json",

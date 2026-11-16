@@ -784,26 +784,39 @@ def validate(path):
     if not review.get('reviewer') or not review.get('reviewed_at'):
         pending.append('缺少实际内容复核者与时间')
     coverage = review.get('coverage', {})
+    compact = review.get('shot_reviews') or None
+    if compact is not None and coverage:
+        errors.append('新旧逐镜检查格式不能同时使用，须选用一种并移除另一套')
     for shot in shots:
         sid = shot['id']
-        for element in ELEMENTS:
-            row = coverage.get(sid, {}).get(element, {})
-            if row.get('status') == 'not_applicable':
-                if not row.get('reason', '').strip():
-                    pending.append(f'{sid}/{element}不适用时须说明依据')
-                continue
-            if row.get('status') != 'pass':
-                pending.append(f'{sid}/{element}尚未复核通过')
-                continue
-            a, b = row.get('source_quote', ''), row.get('prompt_quote', '')
-            pool = text if row.get('scope') == 'shared' else blocks.get(sid, '')
-            source_pool = source_text if row.get('scope') == 'shared' else source_blocks.get(sid, '')
-            if row.get('scope') == 'shared' and not row.get('scope_reason', '').strip():
-                pending.append(f'{sid}/{element}的共享依据缺少适用说明')
-            if not a.strip() or a not in source_pool or not b.strip() or b not in pool:
-                errors.append(f'{sid}/{element}的分镜或提示词证据无法定位')
+        if compact is not None:
+            row = compact.get(sid, {}) if isinstance(compact, dict) else {}
+            if not isinstance(row, dict):
+                row = {}
+            checked = row.get('checked', [])
+            if (row.get('status') != 'pass' or not isinstance(checked, list)
+                    or not all(isinstance(value, str) for value in checked)
+                    or len(checked) != len(ELEMENTS) or set(checked) != set(ELEMENTS)):
+                pending.append(f'{sid}逐镜复核未通过或七要素检查不完整')
+        else:
+            for element in ELEMENTS:
+                row = coverage.get(sid, {}).get(element, {})
+                if row.get('status') == 'not_applicable':
+                    if not row.get('reason', '').strip():
+                        pending.append(f'{sid}/{element}不适用时须说明依据')
+                    continue
+                if row.get('status') != 'pass':
+                    pending.append(f'{sid}/{element}尚未复核通过')
+                    continue
+                a, b = row.get('source_quote', ''), row.get('prompt_quote', '')
+                pool = text if row.get('scope') == 'shared' else blocks.get(sid, '')
+                source_pool = source_text if row.get('scope') == 'shared' else source_blocks.get(sid, '')
+                if row.get('scope') == 'shared' and not row.get('scope_reason', '').strip():
+                    pending.append(f'{sid}/{element}的共享依据缺少适用说明')
+                if not a.strip() or a not in source_pool or not b.strip() or b not in pool:
+                    errors.append(f'{sid}/{element}的分镜或提示词证据无法定位')
         details = review.get('detail_checks', {}).get(sid, [])
-        if not isinstance(details, list) or not details:
+        if not isinstance(details, list) or (not details and compact is None):
             pending.append(f'{sid}缺少逐条关键细节核对')
             continue
         for detail in details:
@@ -861,6 +874,16 @@ def validate(path):
         duration_risk = '压缩时长的对白、动作与反应容量尚未实测通过；交付提示词时须明确标记风险，生成前需核实容量并按授权执行。'
     elif timing.get('status') != 'estimated':
         pending.append('本段容量判断状态待记录')
+    # 可直接计数的中文台词作为粗估下界；复杂读法由人工核对。
+    spoken = [line.get('text', '') for shot in shots for line in shot.get('dialogue', []) if isinstance(line, dict)]
+    countable = [line for line in spoken if isinstance(line, str) and re.fullmatch(r'[\u3400-\u9fff，。！？、；：‘’“”…—,.!?;:\s]+', line)]
+    duration_note = None
+    if timing.get('status') != 'measured' and spoken:
+        if len(countable) != len(spoken):
+            duration_note = '部分台词含数字、英文或其他复杂读法，需按实际发音人工估时。'
+        estimated_dialogue = sum(len(re.sub(r'\s+', '', line)) for line in countable) / 4
+        if estimated_dialogue > duration:
+            duration_risk = '按每秒4字符估算，可直接计数的对白已超过请求时长；如存在并发对白需按实际时间轴试读验证，生成前需解决。'
     for name in JUDGMENTS:
         item = review.get('judgments', {}).get(name, {})
         if item.get('status') != 'pass' or not item.get('evidence', '').strip():
@@ -875,7 +898,7 @@ def validate(path):
               'errors':errors, 'pending':pending,
               'formal_prompt_ready':not errors and not pending,
               'generation_ready':not errors and not pending and not duration_risk and task.get('authorization', {}).get('generate') is True and nonempty(task.get('authorization', {}).get('scope')),
-              'duration_risk':duration_risk,
+              'duration_risk':duration_risk, 'duration_note':duration_note,
               'media_acceptance':'not_evaluated',
               'limits':'格式检查与人工内容记录分开；程序只能核对已登记证据及绑定，不能发现未登记细节或声音需求，也不能证明引用语义、试读真实性、画面或声音效果。'}
     return report

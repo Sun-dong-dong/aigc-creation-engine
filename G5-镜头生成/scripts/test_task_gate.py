@@ -101,6 +101,46 @@ class GateTests(unittest.TestCase):
         self.save()
         self.assertFalse(self.report()['formal_prompt_ready'])
 
+    def test_compact_review_requires_each_shot_and_all_elements(self):
+        self.task['review'].pop('coverage')
+        self.task['review'].pop('detail_checks')
+        self.task['review']['shot_reviews'] = {'S01': {'status': 'pass', 'checked': list(g.ELEMENTS)}}
+        self.save()
+        self.assertTrue(self.report()['formal_prompt_ready'], self.report())
+        self.task['review']['shot_reviews']['S01']['checked'].pop()
+        self.save()
+        self.assertFalse(self.report()['formal_prompt_ready'], self.report())
+        for invalid in [{}, {'S01': 'pass'}, {'S01': {'status': 'pass', 'checked': [{}]}}]:
+            self.task['review']['shot_reviews'] = invalid
+            self.save()
+            self.assertFalse(self.report()['formal_prompt_ready'], self.report())
+
+    def test_chinese_dialogue_estimate_over_duration_flags_risk(self):
+        self.task['shots'][0]['dialogue'] = [{'text': '一二三四五六七八九十一二三四五六七八九十一二三四',
+                                               'speaker': 'S1', 'voice': 'OS'}]
+        self.save()
+        result = self.report()
+        self.assertIn('4字符', result['duration_risk'])
+        self.assertFalse(result['generation_ready'])
+
+    def test_compact_rejects_conflicting_legacy_and_accepts_empty_compact_for_legacy(self):
+        self.task['review']['shot_reviews'] = {}
+        self.save()
+        self.assertTrue(self.report()['formal_prompt_ready'], self.report())
+        self.task['review']['shot_reviews'] = {'S01': {'status': 'pass', 'checked': list(g.ELEMENTS)}}
+        self.save()
+        self.assertFalse(self.report()['formal_prompt_ready'], self.report())
+
+    def test_chinese_lower_bound_survives_mixed_dialogue(self):
+        self.task['shots'][0]['dialogue'] = [
+            {'text': '一二三四五六七八九十一二三四五六七八九十一二三!', 'speaker': 'S1', 'voice': 'OS'},
+            {'text': '等我2分钟', 'speaker': 'S1', 'voice': 'OS'}]
+        self.save()
+        result = self.report()
+        self.assertIn('4字符', result['duration_risk'])
+        self.assertIn('数字', result['duration_note'])
+        self.assertFalse(result['generation_ready'])
+
     def test_valid_and_generation_boundary(self):
         self.assertTrue(self.report()['generation_ready'], self.report())
         for scope in [' ', True, [], None]:
