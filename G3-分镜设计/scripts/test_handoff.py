@@ -70,6 +70,16 @@ class HandoffTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(checker.read_bytes(), original)
 
+    def test_g4_shared_asset_template_passes_g3_handoff(self):
+        template = (SCRIPT.parent.parent.parent / 'G4-角色场景道具与声音资产' / '模板' / '资产清单.md').read_text()
+        separator = '|---|---|---|---|---|---|---|---|'
+        self.assertIn(separator, template)
+        row = '| 钥匙 | 道具，交代回家 | 01 | 手持与放桌 | 无，尚未制作 | 制作钥匙正侧面 | 尚未建立 | 尚未提供 |'
+        assets = template.replace(separator, separator + '\n' + row) + '\n来源：分镜.md v1\n'
+        result = self.run_documents(assets=assets)
+        self.assertTrue(result['documents_passed'], result['errors'])
+        self.assertFalse(self.run_documents(assets=assets.replace('尚未提供 |', ' |'))['documents_passed'])
+
     def test_filled_separate_documents_pass(self):
         result = self.run_documents()
         self.assertTrue(result['documents_passed'], result['errors'])
