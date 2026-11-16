@@ -24,7 +24,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/H3-全参考.md",
-    "template_sha256": "67d6cf7f8f681cdaa29532cecf4ad832b8fbaef9ec632df22ef3769c9a8909d9",
+    "template_sha256": "8a3bbf1e93e28cf1f6524b79e7475228753ee797668ba9b2d7d06738f57b8087",
     "modes": [
       "Ref2VA"
     ],

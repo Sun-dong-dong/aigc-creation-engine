@@ -44,8 +44,18 @@ def nonempty(value):
 def normalize_shot_id(value):
     if not isinstance(value, str):
         return None
-    match = re.fullmatch(r'(?:(?:镜头|镜|shot|s)\s*)?0*(\d+)([A-Za-z]*)', value.strip(), re.I)
-    return (int(match[1]), match[2].upper()) if match else None
+    value = re.sub(r'^(?:镜头|镜|shot)\s*', '', value.strip(), flags=re.I)
+    if re.fullmatch(r'[一二三四五六七八九十百]+', value):
+        return ('中文', value)
+    match = re.fullmatch(r'([A-Za-z]*)([0-9]+)([A-Za-z]*)', value)
+    if not match:
+        return None
+    prefix, number, suffix = match.groups()
+    prefix, suffix = prefix.upper(), suffix.upper()
+    # Historically S is the shot marker, not a distinct source prefix.
+    if prefix in ('', 'S'):
+        return (int(number), suffix)
+    return (prefix, int(number), suffix)
 
 
 def literal_in_narrative(value, body, seedance=False):
@@ -106,7 +116,8 @@ def check_post_handoff(root, task, sid, source_quote, note, errors):
         return
     rows = [[cell.strip().replace('\\|', '|') for cell in re.split(r'(?<!\\)\|', line.strip()[1:-1])]
             for line in handoff.splitlines() if line.strip().startswith('|') and line.strip().endswith('|')]
-    row_match = any(any(normalize_shot_id(cell) == normalize_shot_id(sid) for cell in cells)
+    normalized_sid = normalize_shot_id(sid)
+    row_match = normalized_sid is not None and any(any(normalize_shot_id(cell) == normalized_sid for cell in cells)
                     and note in cells and any(source_quote in cell for cell in cells) for cells in rows)
     sections = [section for section in re.split(r'(?m)(?=^#{1,6}\s+)', handoff)
                 if not re.search(r'(?m)^\s*\|', section)]
@@ -166,7 +177,7 @@ def check_delivery_and_dependencies(root, task, prompt, errors):
             actual = [normalize_shot_id(r[0]) for r in rows]
             expected = [normalize_shot_id(s['id']) for s in shots]
             ordinal = [(i + 1, '') for i in range(len(shots))]
-            if actual != expected and actual != ordinal:
+            if None in actual or None in expected or len(set(expected)) != len(expected) or (actual != expected and actual != ordinal):
                 errors.append('最终交付表格镜号覆盖或顺序不一致')
             else:
                 delivery_rows = {shot['id']: row[3] for shot, row in zip(shots, rows)}
@@ -444,7 +455,8 @@ def check_segmentation(plan, shots, sources, duration, errors):
     scope = plan.get('scope_shots')
     groups = plan.get('groups')
     boundaries = plan.get('boundaries')
-    if not isinstance(scope, list) or not scope or any(not isinstance(x, str) or not x.strip() for x in scope) or len(set(scope)) != len(scope):
+    if (not isinstance(scope, list) or not scope or any(normalize_shot_id(x) is None for x in scope)
+            or len({normalize_shot_id(x) for x in scope}) != len(scope)):
         errors.append('分段范围镜号为空、无效或重复')
         return None
     if not isinstance(groups, list) or not groups or not isinstance(boundaries, list):
@@ -513,7 +525,7 @@ def shot_source_blocks(root, sources, bindings, shots, errors, pending):
         binding = bindings.get(sid, {})
         name, heading = binding.get('path'), binding.get('heading', '')
         if not name or not heading:
-            pending.append(f'{sid}缺少分镜来源文件和镜头标题绑定')
+            pending.append(f'{sid}缺少分镜来源文件和镜头标题绑定；等效分镜表行目前不能直接绑定，需提供可定位的逐镜Markdown标题来源')
             continue
         if name not in allowed or not re.fullmatch(r'#{1,6}\s+[^\n]+', heading):
             errors.append(f'{sid}的来源绑定不是已登记文件中的Markdown标题')
@@ -524,8 +536,8 @@ def shot_source_blocks(root, sources, bindings, shots, errors, pending):
         if expected_id != sid and not nonempty(binding.get('mapping_evidence')):
             errors.append(f'{sid}的源镜号映射缺少具体依据')
             continue
-        header_num = re.search(r'(?:镜头|镜|shot|s)\s*0*(\d+)([A-Za-z]*)', heading, re.I)
-        header_id = (int(header_num[1]), header_num[2].upper()) if header_num else None
+        header_match = re.match(r'^#{1,6}\s+(?:(?:镜头|镜|shot)\s*)?([A-Za-z]*[0-9]+[A-Za-z]*|[一二三四五六七八九十百]+)(?=$|[\s｜|：:，,。；;、！？!?（(【\[［〔《〈「『“‘])', heading, re.I)
+        header_id = normalize_shot_id(header_match[1]) if header_match else None
         if len(hits) != 1 or normalize_shot_id(expected_id) is None or normalize_shot_id(expected_id) != header_id:
             errors.append(f'{sid}的镜头标题无法唯一定位或镜号不符')
             continue
@@ -681,8 +693,9 @@ def validate(path):
     if not isinstance(task.get('task_id'), str) or not task['task_id'].strip():
         errors.append('缺少任务ID')
     shots = task.get('shots', [])
-    if not shots or len({s['id'] for s in shots}) != len(shots):
-        raise ValueError('镜号为空或重复')
+    shot_ids = [normalize_shot_id(s['id']) for s in shots]
+    if not shots or None in shot_ids or len(set(shot_ids)) != len(shots):
+        raise ValueError('镜号为空、格式无效或存在同义重复')
     duration = task['parameters']['duration']
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
         raise ValueError('请求时长必须是有限正数')

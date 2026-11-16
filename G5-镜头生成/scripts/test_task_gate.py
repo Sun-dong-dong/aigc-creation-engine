@@ -204,6 +204,65 @@ class GateTests(unittest.TestCase):
         self.assertFalse(errors)
         self.assertIn('S39A', blocks)
 
+    def test_prefix_and_chinese_source_ids_are_distinct_and_bound(self):
+        for sid, heading in [('A01', '镜头A01'), ('S01', '镜头01'), ('02a', '镜头02A'), ('三', '镜头三')]:
+            self.write('ids.md', '## ' + heading + '\nThe man sits.')
+            errors, pending = [], []
+            blocks = g.shot_source_blocks(self.root, [{'path': 'ids.md'}],
+                {sid: {'path': 'ids.md', 'heading': '## ' + heading}}, [{'id': sid}], errors, pending)
+            self.assertFalse(errors, (sid, errors))
+            self.assertIn(sid, blocks)
+        for other in ['01A', 'B01', 'A02']:
+            self.assertNotEqual(g.normalize_shot_id('A01'), g.normalize_shot_id(other))
+        self.assertNotEqual(g.normalize_shot_id('一'), g.normalize_shot_id('1'))
+
+    def test_source_title_allows_parenthesized_description_without_partial_id_match(self):
+        for title in ('镜头 02（近景）', '镜头02 (close-up)', '镜头02【近景】'):
+            self.write('ids.md', '## ' + title + '\nbody')
+            errors, pending = [], []
+            blocks = g.shot_source_blocks(self.root, [{'path': 'ids.md'}],
+                {'02': {'path': 'ids.md', 'heading': '## ' + title}}, [{'id': '02'}], errors, pending)
+            self.assertFalse(errors, (title, errors))
+            self.assertIn('02', blocks)
+        for title in ('镜头02A（近景）', '镜头020（近景）', '镜头02-03'):
+            self.write('ids.md', '## ' + title + '\nbody')
+            errors, pending = [], []
+            g.shot_source_blocks(self.root, [{'path': 'ids.md'}],
+                {'02': {'path': 'ids.md', 'heading': '## ' + title}}, [{'id': '02'}], errors, pending)
+            self.assertTrue(errors, title)
+
+    def test_source_binding_rejects_wrong_and_ambiguous_titles(self):
+        for heading, text in [('镜头01A', '## 镜头01A\nbody'),
+                              ('镜头B01', '## 镜头B01\nbody'),
+                              ('镜头A02', '## 镜头A02\nbody'),
+                              ('镜头A01', '## 镜头A01\nfirst\n## 镜头A01\nsecond')]:
+            self.write('ids.md', text)
+            errors, pending = [], []
+            g.shot_source_blocks(self.root, [{'path': 'ids.md'}],
+                {'A01': {'path': 'ids.md', 'heading': '## ' + heading}}, [{'id': 'A01'}], errors, pending)
+            self.assertTrue(errors, heading)
+
+    def test_unparseable_ids_do_not_match_delivery_or_handoff(self):
+        self.task['shots'] = [{'id': 'invalid', 'dialogue': []}]
+        self.write('delivery.md', self.delivery.replace('| 1 |', '| wrong |'))
+        self.task['review']['delivery']['sha256'] = self.hash('delivery.md')
+        errors = []
+        g.check_delivery_and_dependencies(self.root, self.task, self.prompt, errors)
+        self.assertTrue(any('镜号' in e for e in errors), errors)
+        self.write('post.md', '| wrong | POST-01 | The man sits. |')
+        self.task['post_handoff_file'] = 'post.md'
+        errors = []
+        g.check_post_handoff(self.root, self.task, 'invalid', 'The man sits.', 'POST-01', errors)
+        self.assertTrue(errors)
+
+    def test_plan_rejects_equivalent_duplicate_ids(self):
+        plan = {'scope_shots': ['01', 'S1'], 'source_sha256': ['hash'],
+                'groups': [{'id': 'A', 'shots': ['01', 'S1'], 'duration': 5, 'reason': 'Fixture'}],
+                'boundaries': [{'left': '01', 'right': 'S1', 'decision': 'merge', 'reason': 'Fixture'}]}
+        errors = []
+        g.check_segmentation(plan, [{'id': '01'}, {'id': 'S1'}], [{'sha256': 'hash'}], 5, errors)
+        self.assertTrue(errors)
+
     def test_deferred_text_requires_scope_and_real_handoff(self):
         detail = {'item': 'Post text fixture', 'status': 'deferred_post', 'scope': 'shared',
                   'source_quote': 'The man sits.', 'post_note': 'POST-01'}
