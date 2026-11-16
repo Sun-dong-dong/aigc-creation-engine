@@ -88,6 +88,19 @@ class GateTests(unittest.TestCase):
     def report(self):
         return g.validate(self.root / 'task.json')
 
+    def test_measured_duration_is_checked_even_without_compression(self):
+        for seconds, formal, ready in [(5, True, True), (9, True, False), (-3, False, False)]:
+            self.task['duration_assessment'] = {'source_seconds': 5, 'basis': 'estimate',
+                'status': 'measured', 'measured_seconds': seconds,
+                'method': 'timeline', 'evidence': 'timed reading'}
+            self.save()
+            result = self.report()
+            self.assertEqual(result['formal_prompt_ready'], formal, result)
+            self.assertEqual(result['generation_ready'], ready, result)
+        self.task['duration_assessment'] = {'source_seconds': 9, 'basis': 'estimate', 'status': 'bogus'}
+        self.save()
+        self.assertFalse(self.report()['formal_prompt_ready'])
+
     def test_valid_and_generation_boundary(self):
         self.assertTrue(self.report()['generation_ready'], self.report())
         for scope in [' ', True, [], None]:

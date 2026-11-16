@@ -193,10 +193,11 @@ def main():
     parser.add_argument('--report', help='保存JSON检查报告')
     args = parser.parse_args()
     inputs = [Path(x).expanduser().resolve() for x in (args.storyboard, args.assets, args.handoff)]
+    inputs.append(Path(__file__).resolve())
     report = Path(args.report).expanduser().resolve() if args.report else None
     if report and any(report == source or (report.exists() and source.exists() and report.samefile(source)) for source in inputs):
         parser.error('报告不能覆盖输入文件或其路径别名')
-    result = check(*inputs)
+    result = check(*inputs[:3])
     output = json.dumps(result, ensure_ascii=False, indent=2)
     if args.report:
         target = Path(args.report).expanduser()

@@ -847,13 +847,19 @@ def validate(path):
     original = timing.get('source_seconds')
     if type(original) not in (int, float) or not math.isfinite(original) or original <= 0 or not timing.get('basis', '').strip():
         pending.append('缺少原分镜时长及本段容量判断依据')
-    elif original > duration:
+    elif timing.get('status') not in ('pending', 'estimated', 'measured'):
+        pending.append('本段容量判断状态无效')
+    elif timing.get('status') == 'measured':
         measured = timing.get('measured_seconds')
-        if (timing.get('status') != 'measured' or type(measured) not in (int, float)
-                or not math.isfinite(measured) or measured <= 0 or measured > duration
-                or not timing.get('method', '').strip() or not timing.get('evidence', '').strip()):
-            duration_risk = '压缩时长的对白、动作与反应容量尚未实测通过；交付提示词时须明确标记风险，生成前需核实容量并按授权执行。'
-    elif timing.get('status') not in ('estimated', 'measured'):
+        if (type(measured) not in (int, float) or not math.isfinite(measured)
+                or measured <= 0 or not timing.get('method', '').strip()
+                or not timing.get('evidence', '').strip()):
+            pending.append('实测容量记录无效或缺少方法及依据')
+        elif measured > duration:
+            duration_risk = '对白、动作与反应的实测容量超过请求时长；生成前需核实容量并按授权执行。'
+    elif original > duration:
+        duration_risk = '压缩时长的对白、动作与反应容量尚未实测通过；交付提示词时须明确标记风险，生成前需核实容量并按授权执行。'
+    elif timing.get('status') != 'estimated':
         pending.append('本段容量判断状态待记录')
     for name in JUDGMENTS:
         item = review.get('judgments', {}).get(name, {})

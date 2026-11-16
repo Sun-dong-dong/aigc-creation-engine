@@ -52,6 +52,24 @@ class HandoffTests(unittest.TestCase):
                 path.write_text(content, encoding='utf-8')
             return g3.check(*paths)
 
+    def test_report_cannot_overwrite_checker_or_hardlink(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            checker = base / 'checker.py'
+            shutil.copy2(SCRIPT, checker)
+            for name, content in [('分镜.md', STORY), ('资产.md', ASSET), ('交接.md', HANDOFF)]:
+                (base / name).write_text(content, encoding='utf-8')
+            alias = base / 'alias.py'
+            os.link(checker, alias)
+            original = checker.read_bytes()
+            for report in [checker, alias]:
+                result = subprocess.run([sys.executable, str(checker), '--storyboard', str(base / '分镜.md'),
+                    '--assets', str(base / '资产.md'), '--handoff', str(base / '交接.md'),
+                    '--report', str(report)], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(checker.read_bytes(), original)
+
     def test_filled_separate_documents_pass(self):
         result = self.run_documents()
         self.assertTrue(result['documents_passed'], result['errors'])
