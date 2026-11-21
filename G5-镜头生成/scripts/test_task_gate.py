@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import os
+from unittest import mock
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,91 @@ class GateTests(unittest.TestCase):
 
     def report(self):
         return g.validate(self.root / 'task.json')
+
+    def test_image_reference_requires_decodable_media(self):
+        self.assertTrue(self.report()['generation_ready'])
+        label = '<Picture 1>'
+        prefix = ('For the target video, at 0.00 seconds into the target video, '
+                  f'{label} (from [Shot 1]) is fully referenced.\n\n')
+        self.write('prompt.txt', prefix + self.prompt)
+        self.write('delivery.md', self.delivery.replace(self.prompt, prefix + self.prompt))
+        self.task['review']['delivery']['sha256'] = self.hash('delivery.md')
+        self.task['mode'] = 'I2VA'
+        image = self.root / 'reference.png'
+        decoder = g.find_ffmpeg()
+        self.assertIsNotNone(decoder, '此集成测试需要可执行的 FFmpeg')
+        subprocess.run([decoder, '-v', 'error', '-f', 'lavfi', '-i', 'color=s=16x16',
+                        '-frames:v', '1', str(image)], check=True)
+        reference = {'path': image.name, 'sha256': self.hash(image.name), 'label': label,
+                     'role': 'first frame', 'selected': True, 'selection_evidence': 'synthetic only'}
+        self.task['references'] = [reference]
+        self.save()
+        result = self.report()
+        self.assertTrue(result['generation_ready'], result)
+        image.write_text('Plain text labelled as a PNG in the test.')
+        reference['sha256'] = self.hash(image.name)
+        self.save()
+        result = self.report()
+        self.assertFalse(result['generation_ready'], result)
+        self.assertTrue(any('参考无法按标签要求解码' in e for e in result['errors']), result)
+
+    def test_ffmpeg_locator_prefers_override_then_path_then_local_bin(self):
+        binary = self.root / 'explicit-ffmpeg'
+        binary.touch(mode=0o700)
+        local = self.root / '.local/bin/ffmpeg'
+        local.parent.mkdir(parents=True)
+        local.touch(mode=0o700)
+        with mock.patch.dict(os.environ, FFMPEG_BIN=str(binary)), mock.patch.object(
+                g.shutil, 'which', return_value='/path-bin/ffmpeg') as which:
+            self.assertEqual(g.find_ffmpeg(), str(binary))
+            which.assert_not_called()
+            binary.chmod(0o600)
+            self.assertEqual(g.find_ffmpeg(), '/path-bin/ffmpeg')
+            which.return_value = None
+            with mock.patch.object(Path, 'home', return_value=self.root):
+                self.assertEqual(g.find_ffmpeg(), str(local))
+
+    def test_real_video_audio_reference_streams(self):
+        decoder = g.find_ffmpeg()
+        self.assertIsNotNone(decoder, '此集成测试需要可执行的 FFmpeg')
+        subprocess.run([decoder, '-v', 'error', '-f', 'lavfi', '-i', 'color=s=16x16',
+                        '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '0.2',
+                        '-c:v', 'ffv1', '-c:a', 'pcm_s16le', str(self.root / 'av.mkv')], check=True)
+        subprocess.run([decoder, '-v', 'error', '-i', str(self.root / 'av.mkv'), '-vn',
+                        str(self.root / 'sound.wav')], check=True)
+        for label, file, valid in [('@视频1', 'av.mkv', True), ('<Audio 1>', 'sound.wav', True),
+                                   ('<Video 1>', 'sound.wav', False)]:
+            with self.subTest(label=label, file=file):
+                errors, pending = [], []
+                g.check_reference_decoding(self.root, [{'label': label, 'path': file}], errors, pending)
+                self.assertEqual(pending, [])
+                self.assertEqual(not errors, valid, errors)
+
+    def test_unknown_model_family_is_rejected(self):
+        original = g.inputs
+        def unsupported(path, task):
+            prompt, profile, files, fingerprint = original(path, task)
+            return prompt, dict(profile, family='unknown'), files, fingerprint
+        with mock.patch.object(g, 'inputs', side_effect=unsupported):
+            result = self.report()
+        self.assertFalse(result['formal_prompt_ready'])
+        self.assertTrue(any('unknown' in error for error in result['errors']), result)
+
+    def test_bom_inputs_pass_full_gate(self):
+        for name in ('source.md', 'prompt.txt', 'draft.txt', 'fixed.json', 'delivery.md'):
+            p = self.root / name
+            p.write_text(p.read_text(), encoding='utf-8-sig')
+        plan = json.loads((self.root / 'plan.json').read_text())
+        plan['source_sha256'] = [self.hash('source.md')]
+        (self.root / 'plan.json').write_text(json.dumps(plan), encoding='utf-8-sig')
+        self.task['source_files'][0]['sha256'] = self.hash('source.md')
+        self.task['fixed_context']['sha256'] = self.hash('fixed.json')
+        self.task['draft_review']['sha256'] = self.hash('draft.txt')
+        self.task['review']['delivery']['sha256'] = self.hash('delivery.md')
+        task = self.save()
+        task.write_text(task.read_text(), encoding='utf-8-sig')
+        result = self.report()
+        self.assertTrue(result['generation_ready'], result)
 
     def test_measured_duration_is_checked_even_without_compression(self):
         for seconds, formal, ready in [(5, True, True), (9, True, False), (-3, False, False)]:
@@ -377,6 +463,93 @@ class GateTests(unittest.TestCase):
         r = subprocess.run([sys.executable, str(SCRIPT), str(self.root / 'task.json'), '--report', str(output)], capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(json.loads(output.read_text())['formal_prompt_ready'])
+
+    def test_all_registered_profiles_match_template_sha256_and_seedance_25_validates(self):
+        registry = json.loads((g.BASE / '模型模板/分支配置.json').read_text(encoding='utf-8'))
+        for name, cfg in registry.items():
+            with self.subTest(profile=name):
+                actual = g.sha((g.BASE / cfg['template']).read_bytes())
+                self.assertEqual(actual, cfg['template_sha256'])
+        # End-to-end Seedance 2.5 validation must pass when properly bound.
+        fixed = json.loads((self.root / 'fixed.json').read_text(encoding='utf-8'))
+        fixed['styles']['seedance-2.5'] = '自然写实光影质感。'
+        fixed['scenes'][0]['texts']['seedance-2.5'] = '简洁房间内，右侧窗口透入柔光。'
+        self.write('fixed.json', fixed)
+        prompt = ('房间内的男子静坐。\n\n'
+                  '镜头1：近景，固定，男子端坐，右侧窗外5600K柔光从右侧照亮男子左脸。\n\n'
+                  '自然写实光影质感。简洁房间内，右侧窗口透入柔光。\n'
+                  '画面无任何文字，无背景音乐。')
+        delivery = ('| 镜头 | 时间（估算） | 景别与运镜 | 画面、表演和台词 |\n'
+                    '|---|---|---|---|\n'
+                    '| S01 | 0—5秒 | 近景，固定 | 男子端坐，右侧窗外5600K柔光照亮左脸，无台词。 |\n\n'
+                    '**参考资产：**无参考（纯文生测试）。\n\n'
+                    '```text\n' + prompt + '\n```\n')
+        self.write('prompt.txt', prompt)
+        self.write('delivery.md', delivery)
+        self.task['profile'] = 'seedance-2.5'
+        self.task['mode'] = 'T2V'
+        self.task['entry'] = 'jimeng-web'
+        self.task['official_reads'] = registry['seedance-2.5']['official_urls']
+        self.task['fixed_context']['sha256'] = self.hash('fixed.json')
+        self.task['review']['delivery']['sha256'] = self.hash('delivery.md')
+        self.task['review']['lighting']['S01'] = {
+            'temperature_quote': '5600K柔光',
+            'source_quote': '右侧窗外5600K柔光',
+            'characters_present': True,
+            'characters': [{'subject': '男子', 'prompt_quote': '从右侧照亮男子左脸'}],
+            'basis': 'room-day scene lighting',
+        }
+        self.task['review']['coverage'] = {}
+        self.task['review']['detail_checks'] = {}
+        self.task['review']['shot_reviews'] = {'S01': {'status': 'pass', 'checked': list(g.ELEMENTS)}}
+        self.save()
+        result = self.report()
+        self.assertTrue(result['formal_prompt_ready'], result)
+        self.assertTrue(result['generation_ready'], result)
+
+    def test_cli_fingerprint_sync_hashes_and_bom_tolerance(self):
+        # Verify --fingerprint matches module.fingerprint()
+        r = subprocess.run([sys.executable, str(SCRIPT), str(self.root / 'task.json'), '--fingerprint'],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), g.fingerprint(self.root / 'task.json'))
+        # Verify --sync-hashes fills only empty/None/placeholder hashes, NEVER overwrites already-bound hashes,
+        # and does not emit fingerprint.
+        old_draft_hash = self.task['draft_review']['sha256']
+        old_fixed_hash = self.task['fixed_context']['sha256']
+        self.task['source_files'][0]['sha256'] = '待填'
+        self.task['review']['delivery']['sha256'] = None
+        self.write('draft.txt', 'modified draft after review')
+        fixed_data = json.loads((self.root / 'fixed.json').read_text(encoding='utf-8'))
+        fixed_data['version'] = 'v2-changed'
+        self.write('fixed.json', fixed_data)
+        self.write('source.md', '\ufeff' + (self.root / 'source.md').read_text(encoding='utf-8'))
+        self.save(rebind=False)
+        r = subprocess.run([sys.executable, str(SCRIPT), str(self.root / 'task.json'), '--sync-hashes'],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        payload = json.loads(r.stdout)
+        self.assertNotIn('fingerprint', payload)
+        self.assertTrue(any('source.md' in x for x in payload['updated']), payload)
+        self.assertTrue(any('delivery.md' in x for x in payload['updated']), payload)
+        self.assertTrue(any('draft.txt' in x for x in payload['skipped']), payload)
+        self.assertTrue(any('fixed.json' in x for x in payload['skipped']), payload)
+        reloaded = json.loads((self.root / 'task.json').read_text(encoding='utf-8'))
+        self.assertEqual(reloaded['source_files'][0]['sha256'], self.hash('source.md'))
+        self.assertEqual(reloaded['review']['delivery']['sha256'], self.hash('delivery.md'))
+        self.assertEqual(reloaded['draft_review']['sha256'], old_draft_hash)
+        self.assertEqual(reloaded['fixed_context']['sha256'], old_fixed_hash)
+        # Mutually exclusive flags must fail cleanly
+        conflict = subprocess.run([sys.executable, str(SCRIPT), str(self.root / 'task.json'),
+                                   '--sync-hashes', '--fingerprint'], capture_output=True, text=True)
+        self.assertNotEqual(conflict.returncode, 0)
+        before = (self.root / 'task.json').read_bytes()
+        output = self.root / 'report.json'
+        conflict = subprocess.run([sys.executable, str(SCRIPT), str(self.root / 'task.json'),
+                                   '--sync-hashes', '--report', str(output)], capture_output=True)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertFalse(output.exists())
+        self.assertEqual(before, (self.root / 'task.json').read_bytes())
 
 
 if __name__ == '__main__':

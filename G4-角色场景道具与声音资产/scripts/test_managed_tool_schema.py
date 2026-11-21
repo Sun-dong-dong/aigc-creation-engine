@@ -32,7 +32,7 @@ class ManagedToolSchemaTests(unittest.TestCase):
         (root / 'prompt.txt').write_text('One complete test image prompt.', encoding='utf-8')
         task = {
             'asset_id': 'test-asset', 'kind': kind,
-            'aspect_ratio': '3:4' if kind == 'character_face' else '3:2',
+            'aspect_ratio': '16:9' if kind == 'character_views' else '3:2',
             'model': {
                 'name': 'test.imagegen', 'version': '', 'mode': 'text-to-image',
                 'entry': 'runtime test.imagegen', 'version_status': 'not_exposed',
@@ -60,7 +60,7 @@ class ManagedToolSchemaTests(unittest.TestCase):
         task_path.write_text(json.dumps(task), encoding='utf-8')
 
     def test_two_first_image_types_accept_bound_managed_schema(self):
-        for kind in ('scene_overhead', 'character_face'):
+        for kind in ('scene_overhead', 'character_views'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as d:
                 task_path, _, schema = self.fixture(Path(d), kind)
                 result = checker.check(task_path)
@@ -68,6 +68,18 @@ class ManagedToolSchemaTests(unittest.TestCase):
                 self.assertTrue(result['generation_ready'], result)
                 self.assertEqual(result['actual_files']['tool-schema.json'], digest(schema))
                 self.assertEqual(result['image_acceptance'], 'not_evaluated')
+
+    def test_codex_imagegen_character_views_contract(self):
+        schema = CHECKER.parents[1] / '模板/image_gen.imagegen.schema.json'
+        with tempfile.TemporaryDirectory() as tmp:
+            task_path, task, _ = self.fixture(Path(tmp), 'character_views')
+            model = task['model']
+            model.update(name='image_gen.imagegen', entry='image_gen.imagegen')
+            model['spec_source'].update(tool_name=model['name'], path=str(schema), sha256=digest(schema))
+            self.bind(task_path, task)
+            result = checker.check(task_path)
+            self.assertTrue(result['generation_ready'], result)
+            self.assertEqual(result['image_acceptance'], 'not_evaluated')
 
     def test_missing_changed_or_wrong_hash_schema_rejected(self):
         for mutation in ('missing', 'changed', 'wrong_hash'):
@@ -128,8 +140,8 @@ class ManagedToolSchemaTests(unittest.TestCase):
 
     def test_requested_ratio_is_target_and_does_not_assert_output_acceptance(self):
         with tempfile.TemporaryDirectory() as d:
-            task_path, task, _ = self.fixture(Path(d), 'character_face')
-            task['requested_aspect_ratio'] = '3:4'
+            task_path, task, _ = self.fixture(Path(d), 'character_views')
+            task['requested_aspect_ratio'] = '16:9'
             self.bind(task_path, task)
             input_fingerprint = checker.fingerprint(task_path)
             # Actual dimensions belong to output acceptance, not generation input.

@@ -24,7 +24,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/H3-全参考.md",
-    "template_sha256": "8a3bbf1e93e28cf1f6524b79e7475228753ee797668ba9b2d7d06738f57b8087",
+    "template_sha256": "988d9031fb79eec62c409580e802089924a9881f17f1fd2833f96780fc82d52c",
     "modes": [
       "Ref2VA"
     ],
@@ -42,7 +42,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/即梦2.0.md",
-    "template_sha256": "5b6092576791b5afde1bf3275d686e91edf995d88a2a9dfd437cb7c498573496",
+    "template_sha256": "a4eec5b92bd6e0223a5963107a4e7efc8b16ca3b7cf12160773397f660607756",
     "modes": [
       "T2V",
       "R2V"
@@ -60,7 +60,7 @@
     "official_verified": true,
     "verified_at": "2026-11-15",
     "template": "模型模板/即梦2.5.md",
-    "template_sha256": "623594d11bcc6b772e5626adac0a7cfdd2049cea09a90024ecc7cf1ff4f4ef4e",
+    "template_sha256": "9fd796ea71ed9ad5e38fb61c15c11b79ab3ffc220b266d4e5f7a4487a9f256c2",
     "modes": [
       "T2V",
       "R2V"

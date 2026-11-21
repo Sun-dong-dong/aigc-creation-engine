@@ -1,0 +1,11 @@
+{
+  "tool": "image_gen.imagegen",
+  "provenance": "Codex 本机受管图像接口声明的摘录。用于核对，调用前复查当次工具声明。",
+  "input": {
+    "prompt": "string (required)",
+    "transparent_background": "optional boolean; set explicitly for the requested background",
+    "referenced_image_paths": "optional array of local image paths or null",
+    "num_last_images_to_include": "optional integer or null"
+  },
+  "editing": "本地路径编辑先查看原图。两种参考字段互斥，新图均省略。"
+}

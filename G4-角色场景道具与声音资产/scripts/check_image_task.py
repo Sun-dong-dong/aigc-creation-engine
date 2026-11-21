@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 
 
-KINDS = {'character_face', 'character_outfit', 'character_views', 'scene_overhead', 'scene_view', 'prop', 'storyboard', 'other'}
-RATIOS = {'character_face': '3:4', 'character_outfit': '9:16', 'character_views': '16:9'}
-DEPENDENCIES = {'character_outfit': ('identity',), 'character_views': ('identity', 'outfit'), 'scene_view': ('scene_base',)}
+KINDS = {'character_views', 'scene_overhead', 'scene_view', 'prop', 'storyboard', 'other'}
+RATIOS = {'character_views': '16:9'}
 PLACEHOLDERS = {'', '待填', '待填写', '待补充', 'TODO', 'TBD', '无'}
 
 
@@ -171,7 +170,7 @@ def check(path):
         errors.append('用户指定的例外记录格式无效')
         override = {}
     rules = override.get('rules', [])
-    if not isinstance(rules, list) or any(x not in ('ratio', 'character_sequence', 'scene_base') for x in rules):
+    if not isinstance(rules, list) or any(x not in ('ratio', 'scene_base') for x in rules):
         errors.append('用户指定的例外范围无效')
         rules = []
     if rules and not present(override.get('user_instruction')):
@@ -179,10 +178,8 @@ def check(path):
         rules = []
     if kind in RATIOS and requested_ratio != RATIOS[kind] and 'ratio' not in rules:
         errors.append('人物图片请求画幅与当前步骤不符')
-    for role in DEPENDENCIES.get(kind, ()):
-        exception = 'scene_base' if role == 'scene_base' else 'character_sequence'
-        if role not in valid_roles and exception not in rules:
-            pending.append(f'本次步骤缺少当前资产已确认的前置参考：{role}')
+    if kind == 'scene_view' and 'scene_base' not in valid_roles and 'scene_base' not in rules:
+        pending.append('本次步骤缺少当前资产已确认的前置参考：scene_base')
     review = task.get('review', {})
     if not isinstance(review, dict):
         review = {}

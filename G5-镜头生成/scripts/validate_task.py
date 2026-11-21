@@ -4,7 +4,11 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -25,7 +29,7 @@ def sha(data):
 
 def read_task(path):
     path = Path(path).resolve()
-    task = json.loads(path.read_text(encoding='utf-8'))
+    task = json.loads(path.read_text(encoding='utf-8-sig'))
     if not isinstance(task, dict):
         raise ValueError('任务必须为JSON对象')
     return path, task
@@ -90,7 +94,7 @@ def task_input_paths(path, task):
     fixed = task.get('fixed_context', {})
     if isinstance(fixed, dict) and nonempty(fixed.get('path')):
         paths.append(resolve(root, fixed['path']))
-    profile = json.loads((BASE / '模型模板/分支配置.json').read_text()).get(task.get('profile'), {})
+    profile = json.loads((BASE / '模型模板/分支配置.json').read_text(encoding='utf-8-sig')).get(task.get('profile'), {})
     if profile.get('template'):
         paths.append(BASE / profile['template'])
     return paths
@@ -106,7 +110,7 @@ def protect_report_output(report, paths):
 
 def check_post_handoff(root, task, sid, source_quote, note, errors):
     try:
-        handoff = resolve(root, task.get('post_handoff_file')).read_text(encoding='utf-8')
+        handoff = resolve(root, task.get('post_handoff_file')).read_text(encoding='utf-8-sig')
     except (OSError, ValueError, TypeError):
         handoff = ''
     # A transfer must exist in a single row or a single event section, not as
@@ -132,7 +136,7 @@ def check_post_handoff(root, task, sid, source_quote, note, errors):
 def check_delivery_and_dependencies(root, task, prompt, errors):
     try:
         raw = resolve(root, task.get('delivery_file')).read_bytes()
-        delivery = raw.decode('utf-8')
+        delivery = raw.decode('utf-8-sig')
     except (OSError, ValueError, TypeError):
         errors.append('缺少可读取的最终完整交付文件')
         delivery, raw = '', b''
@@ -220,8 +224,8 @@ def check_delivery_and_dependencies(root, task, prompt, errors):
 
 def inputs(path, task):
     root = path.parent
-    prompt = resolve(root, task['prompt_file']).read_text(encoding='utf-8')
-    profile = json.loads((BASE / '模型模板/分支配置.json').read_text())[task['profile']]
+    prompt = resolve(root, task['prompt_file']).read_text(encoding='utf-8-sig')
+    profile = json.loads((BASE / '模型模板/分支配置.json').read_text(encoding='utf-8-sig'))[task['profile']]
     template = BASE / profile['template']
     files = {}
     for item in task.get('source_files', []) + task.get('references', []):
@@ -265,6 +269,53 @@ def inputs(path, task):
 def fingerprint(path):
     p, t = read_task(path)
     return inputs(p, t)[3]
+
+
+def find_ffmpeg():
+    env_bin = os.environ.get('FFMPEG_BIN')
+    if env_bin and os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
+        return env_bin
+    found = shutil.which('ffmpeg')
+    if found:
+        return found
+    for candidate in (Path.home() / '.local/bin/ffmpeg', Path('/opt/homebrew/bin/ffmpeg'), Path('/usr/local/bin/ffmpeg')):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def check_reference_decoding(root, refs, errors, pending):
+    if not refs:
+        return
+    decoder = find_ffmpeg()
+    if decoder is None:
+        pending.append('未找到本地 FFmpeg，尚未完成实际参考文件解码检查')
+        return
+    for ref in refs:
+        label = ref['label']
+        if label.startswith(('<Subject ', '<Picture ', '<Video ', '@图片', '@视频')):
+            stream = '0:V:0'
+        elif label.startswith(('<Audio ', '@音频')):
+            stream = '0:a:0'
+        else:
+            # Invalid or unbound labels are handled by the existing format checks.
+            continue
+        media_path = resolve(root, ref['path'])
+        command = [
+            decoder, '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-xerror', '-abort_on', 'empty_output', '-protocol_whitelist', 'file',
+            '-i', str(media_path), '-map', stream, '-f', 'null', '-',
+        ]
+        try:
+            result = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pending.append(f'参考解码未完成：{ref["path"]}')
+            continue
+        if result.returncode != 0:
+            errors.append(f'参考无法按标签要求解码：{label} {ref["path"]}')
 
 
 def h3_format(text, task, errors):
@@ -530,7 +581,7 @@ def shot_source_blocks(root, sources, bindings, shots, errors, pending):
         if name not in allowed or not re.fullmatch(r'#{1,6}\s+[^\n]+', heading):
             errors.append(f'{sid}的来源绑定不是已登记文件中的Markdown标题')
             continue
-        source = resolve(root, name).read_text(encoding='utf-8')
+        source = resolve(root, name).read_text(encoding='utf-8-sig')
         hits = list(re.finditer(r'^' + re.escape(heading) + r'\s*$', source, re.M))
         expected_id = binding.get('source_shot_id', sid)
         if expected_id != sid and not nonempty(binding.get('mapping_evidence')):
@@ -706,13 +757,13 @@ def validate(path):
     if not sources:
         errors.append('缺少可逐镜对照的分镜来源文件')
     try:
-        plan = json.loads(resolve(path.parent, task.get('plan_file')).read_text(encoding='utf-8'))
+        plan = json.loads(resolve(path.parent, task.get('plan_file')).read_text(encoding='utf-8-sig'))
     except (OSError, ValueError, json.JSONDecodeError):
         plan = None
     group_id = check_segmentation(plan, shots, sources, duration, errors)
     if not isinstance(task.get('group_id'), str) or task.get('group_id') != group_id:
         errors.append('本次任务缺少匹配的生成段编号')
-    source_text = '\n'.join(resolve(path.parent, x['path']).read_text(encoding='utf-8') for x in sources)
+    source_text = '\n'.join(resolve(path.parent, x['path']).read_text(encoding='utf-8-sig') for x in sources)
     for item in sources + task.get('references', []):
         if item.get('sha256') != filehashes[item['path']]:
             errors.append(f"文件摘要不一致：{item['path']}")
@@ -724,15 +775,18 @@ def validate(path):
         tokens = re.findall(r'<(?:Subject|Picture|Video|Audio)\b[^>\n]*(?:>|$)', text, re.I | re.M)
         if any(not re.fullmatch(LABEL, token) for token in tokens + labels):
             errors.append('H3参考标签格式或编号非法')
-    else:
+    elif profile['family'] == 'seedance':
         tokens = re.findall(r'@(?:图片|视频|音频|image|video|audio)\s*[-+]?\d+', text, re.I)
         if any(not re.fullmatch(r'@(?:图片|视频|音频)[1-9]\d*', token) for token in tokens + labels):
             errors.append('即梦参考标签格式或编号非法')
+    else:
+        errors.append(f"当前校验器尚未支持模型家族：{profile['family']}")
     for ref in refs:
         if not ref.get('role'):
             errors.append('参考缺少职责')
         if ref.get('selected') is not True or not ref.get('selection_evidence'):
             pending.append(f"参考尚未确认选用：{ref['path']}")
+    check_reference_decoding(path.parent, refs, errors, pending)
     if profile['family'] == 'h3':
         if task['mode'] == 'Ref2VA' and not refs:
             errors.append('H3全参考模式缺少真实参考绑定')
@@ -740,12 +794,14 @@ def validate(path):
         if expected_labels is not None and set(labels) != expected_labels:
             errors.append('H3参考数量/标签与本模式不匹配')
         blocks, _ = h3_format(text, task, errors) if task['mode'] in profile['modes'] else ({}, '')
-    else:
+    elif profile['family'] == 'seedance':
         if task['mode'] == 'T2V' and refs:
             errors.append('纯文生模式不能带参考')
         if task['mode'] == 'R2V' and not refs:
             errors.append('参考模式缺少真实参考')
         blocks, _ = seedance_format(text, task, errors)
+    else:
+        blocks = {}
     check_shot_lighting(task, blocks, errors, delivery_rows)
     format_errors = list(errors)
     before_review_errors = len(errors)
@@ -764,7 +820,7 @@ def validate(path):
         if same_file and disposition != 'accepted_unchanged':
             errors.append('有修订或未明确无变动接纳时，初稿与当前完整修订版必须分别保存')
         draft_bytes = first_path.read_bytes()
-        draft = draft_bytes.decode('utf-8')
+        draft = draft_bytes.decode('utf-8-sig')
         if first.get('sha256') != sha(draft_bytes):
             errors.append('初稿摘要不一致，须重新检查初稿')
         if disposition == 'accepted_unchanged' and draft_bytes != prompt_path.read_bytes():
@@ -935,10 +991,89 @@ def validate(path):
     return report
 
 
+def sync_hashes(path):
+    """Fill empty/placeholder SHA256 fields in the task JSON; never overwrite already-bound hashes."""
+    task_path = Path(path).expanduser().resolve()
+    original = task_path.read_bytes()
+    task = json.loads(original.decode('utf-8-sig'))
+    if not isinstance(task, dict):
+        raise ValueError('任务必须为JSON对象')
+    root = task_path.parent
+    placeholders = {'', '待填', '待填写', '待补充', 'TODO', 'TBD'}
+    updated = []
+    skipped = []
+
+    def is_placeholder(value):
+        if value is None:
+            return True
+        return isinstance(value, str) and value.strip() in placeholders
+
+    def file_sha(rel_path):
+        target = resolve(root, rel_path)
+        return sha(target.read_bytes())
+
+    def fill_if_placeholder(container, key, label, rel_path, reason):
+        current = container.get(key)
+        digest = file_sha(rel_path)
+        if is_placeholder(current):
+            container[key] = digest
+            updated.append(f'{label}:{rel_path}')
+        elif current != digest:
+            skipped.append(f'{label}:{rel_path} ({reason})')
+
+    for section in ('source_files', 'references', 'dependency_files'):
+        items = task.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and nonempty(item.get('path')):
+                fill_if_placeholder(item, 'sha256', section, item['path'],
+                                    '已绑定旧摘要且文件已变化，须重新核查确认后再手动更新')
+
+    fixed = task.get('fixed_context')
+    if isinstance(fixed, dict) and nonempty(fixed.get('path')):
+        fill_if_placeholder(fixed, 'sha256', 'fixed_context', fixed['path'],
+                            '已绑定旧摘要且固定描述已变化，须重新核查后再手动更新')
+
+    draft = task.get('draft_review')
+    if isinstance(draft, dict) and nonempty(draft.get('path')):
+        fill_if_placeholder(draft, 'sha256', 'draft_review', draft['path'],
+                            '已绑定旧摘要，改动初稿须重新独立复检')
+
+    review = task.get('review')
+    delivery = review.get('delivery') if isinstance(review, dict) else None
+    if isinstance(delivery, dict) and nonempty(task.get('delivery_file')):
+        fill_if_placeholder(delivery, 'sha256', 'review.delivery', task['delivery_file'],
+                            '已绑定旧摘要，改动交付稿须回查后手动更新')
+
+    if updated:
+        # Keep the previous complete task if serialisation or any input read fails.
+        with tempfile.NamedTemporaryFile(dir=root, delete=False) as output:
+            temporary = Path(output.name)
+        try:
+            encoding = 'utf-8-sig' if original.startswith(b'\xef\xbb\xbf') else 'utf-8'
+            temporary.write_text(json.dumps(task, ensure_ascii=False, indent=2) + '\n', encoding=encoding)
+            shutil.copymode(task_path, temporary)
+            if task_path.read_bytes() != original:
+                raise ValueError('任务在补填期间已修改，请重新读取后重试')
+            temporary.replace(task_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return {
+        'task': str(task_path),
+        'updated': updated,
+        'skipped': skipped,
+        'note': '仅填充空值/占位符哈希，不覆盖已绑定旧摘要、不修改复核结论或授权、不自动输出指纹；完成人工核查后再单独运行 --fingerprint（分段方案中的 source_sha256 需另行核对）。',
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('task', type=Path)
-    parser.add_argument('--report', type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--fingerprint', action='store_true', help='仅输出当前输入指纹，不生成报告')
+    mode.add_argument('--sync-hashes', action='store_true', help='仅填充任务中空值/占位符的文件SHA256，绝不覆写已绑定旧摘要或修改复核/授权')
+    mode.add_argument('--report', type=Path)
     args = parser.parse_args()
     if args.report:
         try:
@@ -946,6 +1081,19 @@ def main():
             protect_report_output(args.report, task_input_paths(task_path, task))
         except (KeyError, ValueError, TypeError, OSError) as exc:
             parser.error(str(exc))
+    if args.sync_hashes:
+        try:
+            result = sync_hashes(args.task)
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.fingerprint:
+        try:
+            print(fingerprint(args.task))
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            parser.error(str(exc))
+        return 0
     try:
         report = validate(args.task)
     except (KeyError, ValueError, TypeError, OSError, IndexError, AttributeError, OverflowError) as exc:

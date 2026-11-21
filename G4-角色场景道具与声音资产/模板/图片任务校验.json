@@ -1,8 +1,8 @@
 {
   "asset_id": "待填",
-  "kind": "character_face",
-  "aspect_ratio": "3:4",
-  "requested_aspect_ratio": "3:4",
+  "kind": "character_views",
+  "aspect_ratio": "16:9",
+  "requested_aspect_ratio": "16:9",
   "model": {
     "name": "待填",
     "version": "待填",
